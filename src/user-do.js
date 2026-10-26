@@ -1,0 +1,262 @@
+import {
+  COUNTER_NAMES,
+  NUDGE_INTERVAL_MS,
+  NUDGE_RETRY_DELAY_MS,
+  REGISTRATION_LIMIT,
+  REGISTRATION_WINDOW_MS
+} from './constants.js';
+import { fireNudge, isDefiniteFailure } from './destinations.js';
+import { kvRouting } from './routes.js';
+import { parseOwnHosts } from './ssrf.js';
+
+const METHODS = new Set([
+  'check',
+  'increment',
+  'noteActivity',
+  'markDisconnected',
+  'markConnected',
+  'markConnecting',
+  'consumeRegistration',
+  'status',
+  'wipe'
+]);
+
+export class UserDOCore {
+  constructor({ storage, now, setAlarm, deleteAlarm, fire }) {
+    this.s = storage;
+    this.now = now;
+    this.setAlarm = setAlarm;
+    this.deleteAlarm = deleteAlarm;
+    this.fire = fire;
+  }
+
+  async call(method, args) {
+    if (!METHODS.has(method)) throw new Error('E_DO_METHOD');
+    return this[method](args || {});
+  }
+
+  check() {
+    return { disconnected: this.s.get('disconnected') === true };
+  }
+
+  increment({ name }) {
+    if (!COUNTER_NAMES.includes(name)) throw new Error('E_DO_COUNTER');
+    this.#inc(name);
+    return { ok: true };
+  }
+
+  #inc(name) {
+    this.s.put(`c:${name}`, (this.s.get(`c:${name}`) || 0) + 1);
+  }
+
+  status() {
+    const counters = {};
+    for (const n of COUNTER_NAMES) counters[n] = this.s.get(`c:${n}`) || 0;
+    return { counters, last_nudge: this.s.get('last_nudge') ?? null, disconnected: this.s.get('disconnected') === true, connecting: (this.s.get('connecting_until') || 0) > this.now() };
+  }
+
+  #clearPending() {
+    this.s.delete('pending');
+    this.s.delete('pending_channel');
+    this.s.delete('pending_ts');
+  }
+
+  async markDisconnected() {
+    this.s.put('disconnected', true);
+    this.#clearPending();
+    this.s.delete('alarm_at');
+    await this.deleteAlarm();
+    return { ok: true };
+  }
+
+  markConnected() {
+    this.s.delete('disconnected');
+    return { ok: true };
+  }
+
+  markConnecting() {
+    this.s.put('connecting_until', this.now() + 600000);
+    return { ok: true };
+  }
+
+  consumeRegistration() {
+    const now = this.now();
+    let start = this.s.get('reg_start');
+    let count = this.s.get('reg_count') || 0;
+    if (start == null || now - start >= REGISTRATION_WINDOW_MS) {
+      start = now;
+      count = 0;
+    }
+    if (count >= REGISTRATION_LIMIT) return { allowed: false };
+    this.s.put('reg_start', start);
+    this.s.put('reg_count', count + 1);
+    return { allowed: true };
+  }
+
+  async wipe() {
+    await this.deleteAlarm();
+    await this.s.deleteAll();
+    this.s.put('disconnected', true);
+    return { ok: true };
+  }
+
+  async noteActivity({ userId, channelId, ts }) {
+    if (userId) this.s.put('uid', userId);
+    if (this.s.get('disconnected') === true) {
+      this.#inc('dropped');
+      return { action: 'dropped' };
+    }
+    const now = this.now();
+    const last = this.s.get('last_nudge');
+    if (last == null || now - last >= NUDGE_INTERVAL_MS) {
+      this.s.put('last_nudge', now);
+      this.#clearPending();
+      return this.#fireNow(channelId, ts);
+    }
+    this.s.put('pending', true);
+    this.s.put('pending_channel', channelId);
+    this.s.put('pending_ts', ts);
+    this.#inc('coalesced');
+    await this.#ensureAlarm(last + NUDGE_INTERVAL_MS);
+    return { action: 'pending' };
+  }
+
+  async #ensureAlarm(at) {
+    if (this.s.get('alarm_at') != null) return;
+    this.s.put('alarm_at', at);
+    await this.setAlarm(at);
+  }
+
+  async alarm() {
+    this.s.delete('alarm_at');
+    if (this.s.get('disconnected') === true) {
+      this.#clearPending();
+      return;
+    }
+    if (this.s.get('pending') !== true) return;
+    const now = this.now();
+    const last = this.s.get('last_nudge');
+    if (last != null && now - last < NUDGE_INTERVAL_MS) {
+      await this.#ensureAlarm(last + NUDGE_INTERVAL_MS);
+      return;
+    }
+    const channelId = this.s.get('pending_channel');
+    const ts = this.s.get('pending_ts');
+    this.#clearPending();
+    this.s.put('last_nudge', now);
+    await this.#fireNow(channelId, ts);
+  }
+
+  async #fireNow(channelId, ts) {
+    let outcome;
+    try {
+      outcome = await this.fire({ userId: this.s.get('uid'), channelId, ts });
+    } catch {
+      outcome = { kind: 'network' };
+    }
+    if (outcome.kind === 'ok') {
+      this.s.put('fail_streak', 0);
+      this.#inc('forwarded');
+      return { action: 'fired', kind: 'ok' };
+    }
+    this.#inc('errors');
+    if (outcome.kind === 'timeout') this.#inc('timeouts');
+    if (!isDefiniteFailure(outcome)) {
+      this.s.put('fail_streak', 0);
+      return { action: 'fired', kind: outcome.kind };
+    }
+    if (this.s.get('disconnected') === true) return { action: 'fired', kind: outcome.kind };
+    this.s.delete('last_nudge');
+    if ((this.s.get('fail_streak') || 0) === 0) {
+      this.s.put('fail_streak', 1);
+      this.s.put('pending', true);
+      this.s.put('pending_channel', channelId);
+      this.s.put('pending_ts', ts);
+      const at = this.now() + NUDGE_RETRY_DELAY_MS;
+      this.s.put('alarm_at', at);
+      await this.setAlarm(at);
+    } else {
+      this.s.put('fail_streak', 0);
+      this.#clearPending();
+    }
+    return { action: 'fired', kind: outcome.kind };
+  }
+}
+
+function syncStorage(storage) {
+  return {
+    get: (k) => storage.kv.get(k),
+    put: (k, v) => storage.kv.put(k, v),
+    delete: (k) => storage.kv.delete(k),
+    deleteAll: () => storage.deleteAll()
+  };
+}
+
+function makeFire(env) {
+  const routing = kvRouting(env.ROUTES);
+  const validateOpts = { ownHosts: parseOwnHosts(env.OPERATOR_HOSTS).concat(ownHost(env.BASE_URL)) };
+  return async ({ userId, channelId, ts }) => {
+    const entry = await routing.get(userId);
+    if (!entry || entry.dest_type !== 'claude_routine') return { kind: 'invalid' };
+    return fireNudge({ entry, channelId, ts, fetchImpl: fetch, validateOpts });
+  };
+}
+
+function ownHost(baseUrl) {
+  try {
+    return [new URL(baseUrl).hostname.toLowerCase()];
+  } catch {
+    return [];
+  }
+}
+
+export class UserDO {
+  constructor(ctx, env) {
+    this.core = new UserDOCore({
+      storage: syncStorage(ctx.storage),
+      now: () => Date.now(),
+      setAlarm: (t) => ctx.storage.setAlarm(t),
+      deleteAlarm: () => ctx.storage.deleteAlarm(),
+      fire: makeFire(env)
+    });
+  }
+
+  async fetch(request) {
+    const method = new URL(request.url).pathname.slice(1);
+    let args = {};
+    try {
+      args = await request.json();
+    } catch {
+      args = {};
+    }
+    try {
+      return Response.json(await this.core.call(method, args));
+    } catch {
+      return new Response('{"error":"E_DO"}', { status: 400, headers: { 'content-type': 'application/json' } });
+    }
+  }
+
+  async alarm() {
+    try {
+      await this.core.alarm();
+    } catch {
+      console.error('E_DO_ALARM');
+    }
+  }
+}
+
+export function makeDoClient(namespace) {
+  return (userId) => {
+    const stub = namespace.get(namespace.idFromName(userId));
+    return new Proxy(
+      {},
+      {
+        get: (_t, method) => async (args = {}) => {
+          const res = await stub.fetch(`https://do/${String(method)}`, { method: 'POST', body: JSON.stringify(args) });
+          if (!res.ok) throw new Error('E_DO_CALL');
+          return res.json();
+        }
+      }
+    );
+  };
+}

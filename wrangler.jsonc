@@ -1,0 +1,22 @@
+{
+  "name": "dm-relay",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": false },
+  "kv_namespaces": [
+    { "binding": "ROUTES", "id": "a38f420c962c4e7e8acf0dac5694b224" }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "USER_DO", "class_name": "UserDO" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["UserDO"] }
+  ],
+  "vars": {
+    "SLACK_TEAM_ID": "TGVBK27C3",
+    "SLACK_APP_ID": "A0CBLR1H9M5",
+    "BASE_URL": "https://dm-relay.kyle-ae1.workers.dev",
+    "PUBLIC_REPO_URL": "https://REPLACE-public-repo.example",
+    "OPERATOR_HOSTS": ""
+  }
+}
