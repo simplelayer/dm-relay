@@ -16,6 +16,8 @@ export const GROK_SECRET = `whsec_${Buffer.from('0123456789abcdef0123456789abcde
 export const GROK_URL = 'https://hooks.x.ai/webhook/abc123';
 export const ROUTINE_URL = 'https://api.anthropic.com/v1/claude_code/routines/trig_ABC123/fire';
 export const ROUTINE_TOKEN = 'routine-bearer-token';
+export const CURSOR_URL = 'https://api2.cursor.sh/automations/webhook/123e4567-e89b-12d3-a456-426614174000';
+export const CURSOR_TOKEN = 'crsr_TestBearerToken0123456789_abc-DEF';
 export const U1 = 'U1AAAAAA';
 export const U2 = 'U2BBBBBB';
 export const U3 = 'U3CCCCCC';
@@ -195,6 +197,8 @@ export function makeWorld({ fetchHandler, nowMs = 1_800_000_000_000 } = {}) {
     },
     addGrok: (uid, url = `https://hooks.x.ai/w/${uid}`) =>
       routing.put(uid, { dest_type: 'grok', url, secret_or_bearer: GROK_SECRET, mode: 'full' }),
+    addCursor: (uid, url = CURSOR_URL, token = CURSOR_TOKEN) =>
+      routing.put(uid, { dest_type: 'cursor', url, secret_or_bearer: token, mode: 'full' }),
     addClaude: (uid, url = ROUTINE_URL) =>
       routing.put(uid, { dest_type: 'claude_routine', url, secret_or_bearer: ROUTINE_TOKEN, mode: 'nudge' })
   };

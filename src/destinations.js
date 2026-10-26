@@ -1,6 +1,9 @@
 import {
   ANTHROPIC_VERSION,
   CLAUDE_ROUTINE_BETA_HEADER,
+  CURSOR_TOKEN_MAX_LENGTH,
+  CURSOR_TOKEN_MIN_LENGTH,
+  CURSOR_TOKEN_PATTERN,
   FORWARD_TIMEOUT_MS,
   MIN_RETRY_BUDGET_MS,
   NUDGE_TEXT_TEMPLATE,
@@ -64,20 +67,27 @@ async function sendGrokOnce({ entry, bodyBytes, webhookId, nowMs, fetchImpl, tim
   return send(v.url.href, { method: 'POST', headers, body: bodyBytes }, fetchImpl, timeoutMs);
 }
 
-export async function forwardGrok({ entry, forwardPayload, recipientId, fetchImpl, now, deadlineMs, validateOpts }) {
-  const bodyBytes = utf8(JSON.stringify(forwardPayload));
-  const webhookId = `${forwardPayload.event_id}_${recipientId}`;
+async function forwardWithRetry(sendAttempt, { now, deadlineMs, retryable = isRetryable }) {
   let result = { kind: 'timeout' };
   for (let attempt = 0; attempt < 2; attempt++) {
     const remaining = deadlineMs - now();
     if (attempt === 1 && remaining < MIN_RETRY_BUDGET_MS) break;
     if (attempt === 0 && remaining <= 0) return { kind: 'timeout', attempts: 0 };
     const timeoutMs = Math.min(FORWARD_TIMEOUT_MS, remaining);
-    result = await sendGrokOnce({ entry, bodyBytes, webhookId, nowMs: now(), fetchImpl, timeoutMs, validateOpts });
+    result = await sendAttempt(timeoutMs);
     result.attempts = attempt + 1;
-    if (result.kind === 'ok' || !isRetryable(result)) break;
+    if (result.kind === 'ok' || !retryable(result)) break;
   }
   return result;
+}
+
+export async function forwardGrok({ entry, forwardPayload, recipientId, fetchImpl, now, deadlineMs, validateOpts }) {
+  const bodyBytes = utf8(JSON.stringify(forwardPayload));
+  const webhookId = `${forwardPayload.event_id}_${recipientId}`;
+  return forwardWithRetry(
+    (timeoutMs) => sendGrokOnce({ entry, bodyBytes, webhookId, nowMs: now(), fetchImpl, timeoutMs, validateOpts }),
+    { now, deadlineMs }
+  );
 }
 
 export async function verifyGrok({ entry, fetchImpl, now, validateOpts }) {
@@ -118,4 +128,46 @@ export async function fireNudge({ entry, channelId, ts, fetchImpl, validateOpts 
 
 export async function verifyClaude({ entry, fetchImpl, validateOpts }) {
   return fireRoutine({ entry, text: VERIFY_TEXT, fetchImpl, validateOpts });
+}
+
+export function isValidCursorToken(token) {
+  return (
+    typeof token === 'string' &&
+    token.length >= CURSOR_TOKEN_MIN_LENGTH &&
+    token.length <= CURSOR_TOKEN_MAX_LENGTH &&
+    CURSOR_TOKEN_PATTERN.test(token)
+  );
+}
+
+async function sendCursorOnce({ entry, bodyBytes, fetchImpl, timeoutMs, validateOpts }) {
+  const v = validateDestinationUrl(entry.url, { ...validateOpts, type: 'cursor' });
+  if (!v.ok || !isValidCursorToken(entry.secret_or_bearer)) return { kind: 'invalid' };
+  const headers = {
+    'content-type': 'application/json',
+    authorization: `Bearer ${entry.secret_or_bearer}`
+  };
+  return send(v.url.href, { method: 'POST', headers, body: bodyBytes }, fetchImpl, timeoutMs);
+}
+
+const cursorRetryable = (r) =>
+  r.kind === 'rate_limited' || (r.kind === 'http_error' && (r.status === 408 || r.status === 503));
+
+export async function forwardCursor({ entry, forwardPayload, fetchImpl, now, deadlineMs, validateOpts }) {
+  const bodyBytes = utf8(JSON.stringify(forwardPayload));
+  return forwardWithRetry((timeoutMs) => sendCursorOnce({ entry, bodyBytes, fetchImpl, timeoutMs, validateOpts }), {
+    now,
+    deadlineMs,
+    retryable: cursorRetryable
+  });
+}
+
+export async function verifyCursor({ entry, fetchImpl, now, validateOpts }) {
+  const nowMs = now();
+  const body = {
+    type: 'relay.verification',
+    event_id: `evt_verify_${randomBase64Url(12)}`,
+    received_at: new Date(nowMs).toISOString(),
+    text: VERIFY_TEXT
+  };
+  return sendCursorOnce({ entry, bodyBytes: utf8(JSON.stringify(body)), fetchImpl, timeoutMs: FORWARD_TIMEOUT_MS, validateOpts });
 }

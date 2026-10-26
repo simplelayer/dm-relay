@@ -1,5 +1,5 @@
 import { WAIT_UNTIL_BUDGET_MS } from './constants.js';
-import { forwardGrok } from './destinations.js';
+import { forwardCursor, forwardGrok } from './destinations.js';
 import { buildForwardPayload, checkEnvelope, filterMessageEvent } from './filter.js';
 import { resolveRecipients } from './fanout.js';
 import { isUserId } from './routes.js';
@@ -21,11 +21,12 @@ async function deliver(recipient, payload, deps, deadlineMs) {
       await userDo.noteActivity({ userId, channelId: payload.event.channel, ts: payload.event.ts });
       return;
     }
-    if (entry.dest_type !== 'grok') {
+    if (entry.dest_type !== 'grok' && entry.dest_type !== 'cursor') {
       await userDo.increment({ name: 'dropped' });
       return;
     }
-    const result = await forwardGrok({
+    const forward = entry.dest_type === 'cursor' ? forwardCursor : forwardGrok;
+    const result = await forward({
       entry,
       forwardPayload: buildForwardPayload(payload, deps.now()),
       recipientId: userId,

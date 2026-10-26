@@ -1,6 +1,8 @@
 import {
   CLAUDE_FIRE_PATH,
   CLAUDE_HOST,
+  CURSOR_HOST,
+  CURSOR_WEBHOOK_PATH,
   GROK_HOST_PATTERN,
   MAX_URL_LENGTH,
   OPERATOR_HOST_SUFFIXES
@@ -63,6 +65,15 @@ export function validateDestinationUrl(input, { type, ownHosts = [], ownSuffixes
   if (type === 'claude_routine') {
     if (host !== CLAUDE_HOST) return fail('claude_host');
     if (!CLAUDE_FIRE_PATH.test(url.pathname) || url.search !== '' || url.hash !== '') return fail('claude_path');
+  } else if (type === 'cursor') {
+    if (host !== CURSOR_HOST) return fail('cursor_host');
+    if (input.includes('?') || input.includes('#')) return fail('cursor_path');
+    const rest = input.slice('https://'.length);
+    const slash = rest.indexOf('/');
+    const authority = (slash < 0 ? rest : rest.slice(0, slash)).toLowerCase();
+    if (authority !== CURSOR_HOST && authority !== `${CURSOR_HOST}:443`) return fail('cursor_host');
+    const rawPath = slash < 0 ? '' : rest.slice(slash);
+    if (rawPath !== url.pathname || !CURSOR_WEBHOOK_PATH.test(rawPath)) return fail('cursor_path');
   } else if (type === 'grok') {
     if (!grokHostPattern.test(host)) return fail('grok_host');
   } else {

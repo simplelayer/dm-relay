@@ -1,5 +1,5 @@
 import { REQUIRED_SCOPES, SESSION_TTL_S, SLACK_API, SLACK_AUTHORIZE_URL, STATE_TTL_S } from './constants.js';
-import { verifyClaude, verifyGrok } from './destinations.js';
+import { isValidCursorToken, verifyClaude, verifyCursor, verifyGrok } from './destinations.js';
 import {
   connectPage,
   destinationFormPage,
@@ -138,8 +138,9 @@ export async function handleCallback(request, deps) {
 
   if (intent === 'status') {
     const st = await deps.userDo(userId).status();
-    if (!st.connecting && !(await deps.routing.get(userId))) await revokeToken(token, deps);
-    const res = statusPage({ counters: st.counters, lastNudge: st.last_nudge });
+    const route = await deps.routing.get(userId);
+    if (!st.connecting && !route) await revokeToken(token, deps);
+    const res = statusPage({ counters: st.counters, lastNudge: st.last_nudge, showNudge: route?.dest_type === 'claude_routine' });
     res.headers.append('set-cookie', clear);
     return res;
   }
@@ -178,24 +179,27 @@ export async function handleDestination(request, deps) {
     return messagePage('Too many attempts', 'Too many registration attempts. Please try again later.', 429);
   }
   const destType = form.get('dest_type');
-  if (destType !== 'grok' && destType !== 'claude_routine') return retry('Choose a destination type.');
+  if (destType !== 'grok' && destType !== 'claude_routine' && destType !== 'cursor') return retry('Choose a destination type.');
   if (form.get('attest') !== '1' || form.get('no_send') !== '1') return retry('Both confirmations are required.');
   const secret = (form.get('secret') || '').trim();
   const v = validateDestinationUrl((form.get('url') || '').trim(), { type: destType, ...deps.validateOpts });
   if (!v.ok) return retry('That URL is not allowed.');
   if (destType === 'grok' && !isValidSecret(secret)) return retry('The signing secret must start with whsec_ and be valid base64.');
   if (destType === 'claude_routine' && secret === '') return retry('A bearer token is required.');
+  if (destType === 'cursor' && !isValidCursorToken(secret)) return retry('The bearer token must start with crsr_ and contain only letters, digits, hyphens and underscores (20 to 200 characters).');
 
   const entry = {
     dest_type: destType,
     url: v.url.href,
     secret_or_bearer: secret,
-    mode: destType === 'grok' ? 'full' : 'nudge'
+    mode: destType === 'claude_routine' ? 'nudge' : 'full'
   };
-  const verified =
-    destType === 'grok'
-      ? await verifyGrok({ entry, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts })
-      : await verifyClaude({ entry, fetchImpl: deps.fetchImpl, validateOpts: deps.validateOpts });
+  const verifiers = {
+    grok: () => verifyGrok({ entry, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts }),
+    cursor: () => verifyCursor({ entry, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts }),
+    claude_routine: () => verifyClaude({ entry, fetchImpl: deps.fetchImpl, validateOpts: deps.validateOpts })
+  };
+  const verified = await verifiers[destType]();
   if (verified.kind !== 'ok') return retry(`Verification failed (${verified.kind}${verified.status ? ` ${verified.status}` : ''}). You can try again.`);
 
   await deps.routing.put(userId, entry);

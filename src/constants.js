@@ -30,6 +30,15 @@ export const CLAUDE_ROUTINE_BETA_HEADER = 'experimental-cc-routine-2026-04-01';
 // TODO(P7): replace with the host pattern confirmed by POSTing a signed test to a Grok webhook.
 export const GROK_HOST_PATTERN = /^([a-z0-9-]+\.)*(x\.ai|grok\.com)$/;
 
+// TODO(P12): confirm host api2.cursor.sh and the crsr_ token character set by registering a real automation.
+export const CURSOR_HOST = 'api2.cursor.sh';
+export const CURSOR_WEBHOOK_PATH =
+  /^\/automations\/webhook\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+// TODO(P12): confirm host api2.cursor.sh and the crsr_ token character set by registering a real automation.
+export const CURSOR_TOKEN_PATTERN =/^crsr_[A-Za-z0-9_-]+$/;
+export const CURSOR_TOKEN_MIN_LENGTH = 20;
+export const CURSOR_TOKEN_MAX_LENGTH = 200;
+
 export const NUDGE_TEXT_TEMPLATE =
   'new DM activity in channel_id {C} at ts {T}; check my Slack DMs and draft replies for my approval';
 export const VERIFY_TEXT = 'dm-relay connection test; there is no new DM activity, no action needed';
