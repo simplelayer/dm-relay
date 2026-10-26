@@ -154,9 +154,17 @@ export async function handleCallback(request, deps) {
   return res;
 }
 
-async function readForm(request, deps) {
+function originAllowed(request, deps) {
+  const site = request.headers.get('sec-fetch-site');
+  if (site !== null && site !== 'same-origin') return false;
   const origin = request.headers.get('origin');
-  if (origin && origin !== new URL(deps.config.baseUrl).origin) return { error: messagePage('Forbidden', 'Cross-origin request refused.', 403) };
+  if (origin === null || origin === '') return true;
+  if (origin === 'null') return true;
+  return origin === new URL(deps.config.baseUrl).origin;
+}
+
+async function readForm(request, deps) {
+  if (!originAllowed(request, deps)) return { error: messagePage('Forbidden', 'Cross-origin request refused.', 403) };
   const session = await getSession(request, deps);
   if (!session) return { error: messagePage('Session expired', 'Please start again from /connect.', 401) };
   const form = new URLSearchParams(await request.text());

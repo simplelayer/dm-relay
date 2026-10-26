@@ -198,6 +198,71 @@ test('POST /destination without a session is rejected', async () => {
   assert.equal(await w.routing.get(U1), null);
 });
 
+const BASE_ORIGIN = 'https://relay.example.net';
+const ORIGIN_CASES = [
+  ['a: Origin null + same-origin', { origin: 'null', 'sec-fetch-site': 'same-origin' }, true],
+  ['b: Origin null + cross-site', { origin: 'null', 'sec-fetch-site': 'cross-site' }, false],
+  ['c1: evil Origin + same-origin', { origin: 'https://evil.example', 'sec-fetch-site': 'same-origin' }, false],
+  ['c2: evil Origin + cross-site', { origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' }, false],
+  ['c3: evil Origin, no sec-fetch-site', { origin: 'https://evil.example' }, false],
+  ['d: base Origin + same-origin', { origin: BASE_ORIGIN, 'sec-fetch-site': 'same-origin' }, true],
+  ['e: no Origin, no sec-fetch-site', {}, true],
+  ['f: base Origin + cross-site', { origin: BASE_ORIGIN, 'sec-fetch-site': 'cross-site' }, false],
+  ['h: Origin null, no sec-fetch-site (older browsers)', { origin: 'null' }, true],
+  ['i: no Origin + same-site', { 'sec-fetch-site': 'same-site' }, false],
+  ['j: no Origin + none', { 'sec-fetch-site': 'none' }, false],
+];
+
+for (const [name, headers, ok] of ORIGIN_CASES) {
+  test(`origin policy POST /destination ${name}`, async () => {
+    const w = world();
+    const l = await login(w);
+    const res = await post(w, '/destination', l.cookie, grokFields(l.csrf), headers);
+    if (ok) {
+      assert.equal(res.status, 200);
+      assert.notEqual(await w.routing.get(U1), null);
+    } else {
+      assert.equal(res.status, 403);
+      assert.match(await res.text(), /Cross-origin request refused/);
+      assert.equal(await w.routing.get(U1), null);
+    }
+  });
+
+  test(`origin policy POST /disconnect/confirm ${name}`, async () => {
+    const w = world();
+    await w.addGrok(U1);
+    const d = await login(w, 'disconnect', U1);
+    const res = await post(w, '/disconnect/confirm', d.cookie, { csrf: d.csrf }, headers);
+    if (ok) {
+      assert.equal(res.status, 200);
+      assert.equal((await w.entry(U1).core.check()).disconnected, true);
+    } else {
+      assert.equal(res.status, 403);
+      assert.match(await res.text(), /Cross-origin request refused/);
+      assert.equal((await w.entry(U1).core.check()).disconnected, false);
+    }
+  });
+}
+
+test('origin policy g: bad CSRF token is still 403 with a good origin (both endpoints)', async () => {
+  const good = { origin: BASE_ORIGIN, 'sec-fetch-site': 'same-origin' };
+  for (const headers of [good, { origin: 'null', 'sec-fetch-site': 'same-origin' }]) {
+    const w = world();
+    const l = await login(w);
+    const r1 = await post(w, '/destination', l.cookie, grokFields('A'.repeat(43)), headers);
+    assert.equal(r1.status, 403);
+    assert.match(await r1.text(), /Invalid request token/);
+    assert.equal(await w.routing.get(U1), null);
+    const w2 = world();
+    await w2.addGrok(U1);
+    const d = await login(w2, 'disconnect', U1);
+    const r2 = await post(w2, '/disconnect/confirm', d.cookie, { csrf: 'bad' }, headers);
+    assert.equal(r2.status, 403);
+    assert.match(await r2.text(), /Invalid request token/);
+    assert.equal((await w2.entry(U1).core.check()).disconnected, false);
+  }
+});
+
 test('POST /destination without or with wrong CSRF is rejected and writes nothing', async () => {
   const w = world();
   const l = await login(w);
