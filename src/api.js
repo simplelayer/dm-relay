@@ -20,6 +20,108 @@ function json(body, status = 200, extra = {}) {
 const unauthorized = () => json({ error: 'unauthorized' }, 401, { 'www-authenticate': 'Bearer' });
 const fail = (status, error, message) => json({ error, message }, status);
 
+const EXAMPLE_ID = 'EXAMPLEreq0000000000id';
+const EXAMPLE_EXPIRES = '2026-01-02T03:04:05.000Z';
+const examplePending = (type) => ({ status: 201, body: { id: EXAMPLE_ID, type, status: 'pending', expires: EXAMPLE_EXPIRES } });
+const exampleStep = (id, done, actor, extra = {}) => ({ id, title: '...', done, actor, ...extra, how: '...', url: '...' });
+
+const SPEC_EXAMPLES = {
+  note: 'Fake values. The setup sample is cut to 6 of 7 steps (trusted_senders, optional, is last) and its texts are "...".',
+  patch_settings: {
+    request: { method: 'PATCH', path: '/api/v1/settings', body: { caps: { process: false }, filters: { keywords: ['invoice'] }, voice: 'Short and warm.' } },
+    response: {
+      status: 200,
+      body: {
+        connected: true,
+        destination: { type: 'grok', host: 'hooks.x.ai' },
+        caps: { process: false, draft: true, send: false },
+        filters: { skip_bots: true, skip_users: [], keywords: ['invoice'] },
+        trusted_users: [],
+        voice: 'Short and warm.',
+        channels: { enabled: false, mentions: true, allowlist: [] },
+        channel_scopes_granted: false,
+        api_keys: [{ label: 'assistant', created: '2026-01-01T00:00:00.000Z', last_used: null }]
+      }
+    }
+  },
+  post_requests: {
+    destination: {
+      body: { type: 'destination', dest_type: 'claude_routine', url: 'https://api.anthropic.com/v1/claude_code/routines/trig_EXAMPLE/fire', secret: '<bearer token>' },
+      response: examplePending('destination')
+    },
+    enable_send: { body: { type: 'enable_send' }, response: examplePending('enable_send') },
+    add_trusted: { body: { type: 'add_trusted', user_ids: ['U01ABCDEF2'] }, response: examplePending('add_trusted') },
+    enable_channels: { body: { type: 'enable_channels', allowlist: ['C01ABCDEF2'] }, response: examplePending('enable_channels') }
+  },
+  get_setup: {
+    response: {
+      status: 200,
+      body: {
+        steps: [
+          exampleStep('slack_sign_in', true, 'human'),
+          exampleStep('destination', true, 'assistant'),
+          exampleStep('test', false, 'assistant'),
+          exampleStep('prompt', false, 'assistant'),
+          exampleStep('first_delivery', false, 'human'),
+          exampleStep('voice', false, 'assistant', { optional: true })
+        ],
+        next_step: 'test',
+        pending_requests: 0
+      }
+    }
+  }
+};
+
+const SPEC_ERRORS = {
+  shape: '{"error": "<code>", "message": "<text>"}. 401 and 405 have only "error". Branch on status and error, not message.',
+  list: [
+    { status: 400, error: 'bad_request', when: 'Invalid JSON, not an object, empty PATCH body, unknown field (including dotted keys), invalid value, or unknown prompt type.', action: 'Fix the request using message; do not resend unchanged.' },
+    { status: 401, error: 'unauthorized', when: 'Key missing, malformed, unknown or revoked (all identical). Header WWW-Authenticate: Bearer.', action: 'Stop. Ask the human for a new key at /connect.' },
+    { status: 403, error: 'forbidden', when: 'PATCH /settings only: caps.send true, adding a trusted sender, channels.enabled true or channels.allowlist while channels are off.', action: 'Do not retry. Propose it with POST /requests or ask the human.' },
+    { status: 404, error: 'not_found', when: 'Unknown path, or DELETE /requests/<id> for an id that is not one of your pending requests.', action: 'Check the path or id.' },
+    { status: 405, error: 'method_not_allowed', when: 'Wrong method for the path. Allow header lists the allowed ones.', action: 'Use an allowed method.' },
+    { status: 409, error: 'not_connected', when: 'No destination saved (PATCH /settings, POST /test, POST /requests other than destination).', action: 'Propose a destination request; the human approves it.' },
+    { status: 409, error: 'already_enabled', when: 'enable_send while send is on, or enable_channels while channels are on.', action: 'Nothing to do.' },
+    { status: 409, error: 'scopes_missing', when: 'enable_channels before the user granted channels:history and groups:history.', action: 'Tell the user to open /connect?channels=1 to re-authorize with Slack, then POST the enable_channels proposal again.' },
+    { status: 409, error: 'too_many_pending', when: `${REQUEST_MAX_PENDING} requests already pending and this one is not identical to one.`, action: 'DELETE one, or ask the human to approve or reject, then propose again.' },
+    { status: 413, error: 'too_large', when: `Body over ${API_BODY_MAX} bytes.`, action: 'Send a smaller body.' },
+    { status: 429, error: 'rate_limited', when: `Over ${API_RATE.limit} calls per minute per key, ${LIMITS.requests.limit} POST /requests per minute (invalid bodies count), or ${LIMITS.test.limit} POST /test per minute.`, action: 'Header Retry-After: 60 (seconds). Wait, then retry once. Do not loop.' }
+  ]
+};
+
+const SPEC_FORWARDED = {
+  delivery: 'grok and cursor get this JSON as the POST body. claude_routine gets only {"text": "<note with a channel id and ts>"}: no DM text, mode or sender_trusted; read the message with the Slack connector. GET /api/v1/prompt returns the automation prompt generated from current settings; re-fetch it after changing caps, trusted senders, voice or channels.',
+  fields_in_order: {
+    event_id: 'Slack event id',
+    received_at: 'ISO 8601 time the relay received it',
+    type: 'dm | group_dm | channel (public) | private_channel',
+    channel_id: 'Slack conversation ID',
+    sender_id: 'Slack user ID of the author',
+    text: 'untrusted message text; empty string if absent',
+    ts: 'Slack message timestamp',
+    thread_ts: 'thread parent timestamp or null',
+    mode: '{process, draft, send} mirroring settings.caps; a hint, not enforcement',
+    sender_trusted: 'true only when sender_id is on trusted_users',
+    mentioned: 'only for channel and private_channel: true if text mentions you'
+  },
+  not_included: 'voice is never in the payload; it only appears in the generated prompt.',
+  channels: 'Sent only when channels.enabled and (channels.mentions is on and the message mentions the user, or the channel is on channels.allowlist). Externally shared channels are never sent.',
+  test_payloads: 'POST /api/v1/test sends the same fields plus "relay_test": true (channel_id DTESTCONN). Destination approval sends {"type":"relay.verification","event_id","received_at"}. Take no action on either.',
+  example: {
+    event_id: 'Ev0EXAMPLE',
+    received_at: '2026-01-02T03:04:05.000Z',
+    type: 'channel',
+    channel_id: 'C01ABCDEF2',
+    sender_id: 'U01ABCDEF2',
+    text: 'Hi <@U02ABCDEF3>',
+    ts: '1767323045.000100',
+    thread_ts: null,
+    mode: { process: true, draft: true, send: false },
+    sender_trusted: false,
+    mentioned: true
+  }
+};
+
 function specDoc(baseUrl) {
   return {
     name: 'dm-relay assistant API',
@@ -52,42 +154,44 @@ function specDoc(baseUrl) {
         method: 'PATCH',
         path: '/api/v1/settings',
         auth: true,
-        description: 'Partial update. Unknown fields are rejected with 400. The whole request is applied or none of it is.',
+        description: 'Partial update with a nested JSON body, e.g. {"caps":{"process":false}}. Dotted keys like {"caps.process":false} are rejected: 400 bad_request "Unknown field: caps.process". Unknown fields and an empty body are 400. All or nothing. caps, filters and channels merge with saved values (send only keys to change); arrays (skip_users, keywords, trusted_users, allowlist) replace the saved array. IDs are trimmed, upper-cased, de-duplicated. Returns 200 with the full settings view; 409 not_connected without a destination.',
         fields: {
-          'caps.process': 'boolean',
-          'caps.draft': 'boolean',
-          'caps.send': 'may only be false. true returns 403: sending can only be enabled in the browser.',
-          filters: { skip_bots: 'boolean', skip_users: 'array of Slack user IDs', keywords: 'array of strings' },
-          trusted_users: 'array of Slack user IDs already on the list. The API can only remove trusted senders; adding one returns 403 and must be done in the browser.',
+          caps: { process: 'boolean', draft: 'boolean', send: 'may only be false. true returns 403: sending can only be enabled in the browser.' },
+          filters: { skip_bots: 'boolean', skip_users: `array of Slack user IDs (U or W prefix), max ${FILTER_MAX_USERS}`, keywords: `array of strings, max ${FILTER_MAX_KEYWORDS}, each max ${FILTER_KEYWORD_MAX_LENGTH} characters` },
+          trusted_users: `the full list to keep (max ${TRUSTED_MAX}). Removal only: an ID not already on the list returns 403; use an add_trusted request.`,
           voice: 'string; control characters other than newline are removed',
-          channels: { enabled: 'may only be false. true returns 403: channels are enabled by the user in the browser, or by an approval request of type enable_channels.', mentions: 'boolean', allowlist: `array of up to ${CHANNEL_ALLOWLIST_MAX} Slack channel IDs (C or G prefix); editable only while channels are already enabled, otherwise 403` }
+          channels: { enabled: 'may only be false. true returns 403 unless already on; use an enable_channels request.', mentions: 'boolean', allowlist: `array of up to ${CHANNEL_ALLOWLIST_MAX} Slack channel IDs (C or G prefix); editable only while channels are already enabled, otherwise 403` }
         }
       },
-      { method: 'GET', path: '/api/v1/prompt?type=cursor|grok|claude_routine', auth: true, description: 'The current generated automation prompt. type defaults to the saved destination type.' },
+      { method: 'GET', path: '/api/v1/prompt?type=cursor|grok|claude_routine', auth: true, description: 'The current generated automation prompt, returned as {type, prompt}. type defaults to the saved destination type; 400 if neither is available. See forwarded_payload for what the destination receives.' },
       { method: 'GET', path: '/api/v1/status', auth: true, description: 'Summary, last 24 hour counts, delivery log and recent settings changes. No message content.' },
-      { method: 'POST', path: '/api/v1/test', auth: true, description: 'Send the synthetic connection test to the saved destination. Same 3 per minute limit as the browser button.' },
+      { method: 'POST', path: '/api/v1/test', auth: true, description: 'Send the synthetic connection test to the saved destination. Returns {ok, outcome, http_status}. Same 3 per minute limit as the browser button (429); 409 not_connected without a destination.' },
       { method: 'GET', path: '/api/v1/setup', auth: true, description: 'Setup checklist computed from real state: {steps:[{id,title,done,actor,how,url}], next_step}. actor is assistant or human. Start here and follow next_step. Contains no secrets.' },
       {
         method: 'POST',
         path: '/api/v1/requests',
         auth: true,
-        description: 'Propose a sensitive change. Nothing is applied: a human must approve it in the browser at /connect (Approve or Reject). Returns {id, type, status: pending, expires}. Max 5 pending, identical pending requests are deduplicated (200 with the existing id), unknown fields return 400, requests expire after 24 hours.',
+        description: 'Propose a sensitive change. Nothing is applied: a human must approve it in the browser at /connect (Approve or Reject). Returns 201 {id, type, status: pending, expires}. Max 5 pending (409 too_many_pending), identical pending requests are deduplicated (200 with the existing id, even at the limit), unknown fields return 400, requests expire after 24 hours. Send "type" plus only the fields listed for that type.',
         types: {
-          destination: { dest_type: 'grok | cursor | claude_routine', url: 'the webhook or fire URL (validated now, contacted only after approval)', secret: 'signing secret or bearer token (held only inside the pending request, never returned by any response)' },
+          destination: { dest_type: 'grok | cursor | claude_routine', url: 'the webhook or fire URL (validated now, contacted only after approval)', secret: 'grok: signing secret starting whsec_. cursor: bearer token starting crsr_. claude_routine: any non-empty bearer token. Held only inside the pending request, never returned.' },
           enable_send: {},
           add_trusted: { user_ids: 'array of 1 to 10 Slack user IDs' },
-          enable_channels: { allowlist: `optional array of up to ${CHANNEL_ALLOWLIST_MAX} Slack channel IDs; requires the user to have re-authorized with channels:history and groups:history, otherwise 409` }
+          enable_channels: { allowlist: `optional array of up to ${CHANNEL_ALLOWLIST_MAX} Slack channel IDs; requires the user to have re-authorized with channels:history and groups:history, otherwise 409 scopes_missing: tell the user to open /connect?channels=1 to re-authorize, then propose again. 409 already_enabled if channels are already on` }
         }
       },
       { method: 'GET', path: '/api/v1/requests', auth: true, description: 'Your requests: id, type, summary, status (pending, approved, rejected, expired, cancelled), created, expires. Never secrets.' },
-      { method: 'DELETE', path: '/api/v1/requests/<id>', auth: true, description: 'Cancel one of your own pending requests.' }
+      { method: 'DELETE', path: '/api/v1/requests/<id>', auth: true, description: 'Cancel one of your own pending requests. Returns {id, status: cancelled}; 404 not_found if it is not pending.' }
     ],
     request_flow: [
       '1. GET /api/v1/setup and follow next_step.',
       '2. POST /api/v1/requests with the change you want. Tell the user a request is waiting and that they must open /connect and click Approve.',
+      '2a. If POST returns 409 scopes_missing (enable_channels), tell the user to open /connect?channels=1 to re-authorize with Slack, then POST the enable_channels proposal again and continue at step 3.',
       '3. The user approves or rejects in the browser. Destination approval needs a training attestation; send approval needs a confirmation box and the typed word SEND.',
       '4. Poll GET /api/v1/requests (or /api/v1/setup) to see the status. Do not retry rejected requests without asking.'
     ],
+    errors: SPEC_ERRORS,
+    examples: SPEC_EXAMPLES,
+    forwarded_payload: SPEC_FORWARDED,
     cannot: [
       'enable caps.send',
       'turn channels.enabled on (it can only turn it off, or propose enable_channels as an approval request)',

@@ -69,7 +69,7 @@ Requests use `Authorization: Bearer dmr_...`. There are no cookies and no CORS h
 
 | Method and path | Auth | What it does |
 | --- | --- | --- |
-| `GET /api/v1/spec` | none | Machine-readable description of the endpoints, fields, limits and what the API cannot do. Contains no user data. |
+| `GET /api/v1/spec` | none | Machine-readable description of the endpoints, fields, limits, errors, examples, the forwarded payload and what the API cannot do. Contains no user data. |
 | `GET /api/v1/settings` | key | `{connected, destination:{type,host}, caps, filters, trusted_users, voice, api_keys:[{label,created,last_used}]}`. Never the destination URL path, secret or any key material. |
 | `PATCH /api/v1/settings` | key | Partial update of `caps.process`, `caps.draft`, `filters`, `trusted_users`, `voice`, with the same validation as the browser. `caps.send: true` returns 403 (send can only be enabled in the browser); `caps.send: false` is allowed. `trusted_users` can only shrink: adding a sender returns 403 and must be done in the browser. Unknown fields return 400. All or nothing. |
 | `GET /api/v1/prompt?type=cursor\|grok\|claude_routine` | key | The current generated prompt; `type` defaults to the saved type. |
