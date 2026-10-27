@@ -1,7 +1,7 @@
 import { WAIT_UNTIL_BUDGET_MS } from './constants.js';
 import { forwardCursor, forwardGrok } from './destinations.js';
 import { destLabel, outcomeLabel } from './delivery-log.js';
-import { applyUserFilters, buildForwardPayload, checkEnvelope, filterMessageEvent } from './filter.js';
+import { applyChannelPolicy, applyUserFilters, buildForwardPayload, checkEnvelope, filterMessageEvent, isChannelEvent } from './filter.js';
 import { resolveRecipients } from './fanout.js';
 import { isUserId } from './routes.js';
 import { wipeUser } from './wipe.js';
@@ -15,6 +15,7 @@ async function deliver(recipient, payload, deps, deadlineMs) {
   const { userId, entry } = recipient;
   const userDo = deps.userDo(userId);
   try {
+    if (isChannelEvent(payload.event) && !applyChannelPolicy(payload.event, userId, entry.channels).forward) return;
     if ((await userDo.check()).disconnected) {
       await userDo.increment({ name: 'dropped' });
       return;
@@ -35,7 +36,7 @@ async function deliver(recipient, payload, deps, deadlineMs) {
     const forward = entry.dest_type === 'cursor' ? forwardCursor : forwardGrok;
     const result = await forward({
       entry,
-      forwardPayload: buildForwardPayload(payload, deps.now(), entry),
+      forwardPayload: buildForwardPayload(payload, deps.now(), entry, userId),
       recipientId: userId,
       fetchImpl: deps.fetchImpl,
       now: deps.now,
@@ -72,7 +73,7 @@ export async function processEvent(payload, deps) {
     await handleRevocation(event, deps);
     return;
   }
-  if (!filterMessageEvent(payload, { allowBots: true }).forward) return;
+  if (!filterMessageEvent(payload, { allowBots: true, allowChannels: true }).forward) return;
 
   const { recipients, degraded } = await resolveRecipients({
     payload,

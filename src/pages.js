@@ -110,9 +110,10 @@ function repoLink(url) {
   return /^https:\/\//.test(url || '') ? `<a href="${esc(url)}">${esc(url)}</a>` : esc(url);
 }
 
-export function connectPage({ intent, authorizeUrl, cookie, publicRepoUrl }) {
+export function connectPage({ intent, authorizeUrl, cookie, publicRepoUrl, channels = false }) {
   const verb = { connect: 'Connect', disconnect: 'Disconnect', status: 'View status for' }[intent];
   const body = `<h1>${esc(verb)} DM Relay</h1>
+${channels ? banner('warning', `<strong>Channel access.</strong><p>This sign-in also asks Slack for permission to read public and private channel messages (channels:history and groups:history). Nothing from channels is forwarded until you turn channels on, and then only messages that mention you or are in channels you list. Private channel content becomes visible to this relay only for users who opt in.</p>`) : ''}
 ${card('', 'What is DM Relay?', `<p>DM Relay turns your Slack direct messages into draft replies from your own AI assistant. When someone messages you, the relay passes the message to the assistant you choose, and your assistant can prepare a reply for you to review.</p>
 <p>The relay never sends anything itself. You choose what your assistant may do, and you can disconnect at any time.</p>
 <p class="muted small">The rest of this page explains exactly what happens to your data. Please read it before you continue.</p>`)}
@@ -242,6 +243,24 @@ ${csrfInput(csrf)}
 </form>`;
 }
 
+function channelsBlock(csrf, manage) {
+  const c = manage.channels;
+  const scopes = manage.channelScopes
+    ? ''
+    : banner('info', `<strong>Re-authorize first.</strong><p>Channels need two extra Slack permissions (channels:history and groups:history) that your current sign-in did not grant. <a href="/connect?channels=1">Re-authorize with channel access</a>, then come back here. Until then, turning channels on is blocked.</p>`);
+  return `${msgLine(manage.channelsMsg)}${scopes}
+<form method="post" action="/channels">
+${csrfInput(csrf)}
+<fieldset><legend>Channels (off by default)</legend>
+<p class="muted small">Off by default. When on, messages from public and private channels you are in are forwarded to your destination only if they mention you or are in a channel on your list below. Private channel text becomes visible to this relay for your account only. Messages from channels shared with other workspaces are never forwarded. Your filters and trusted senders still apply.</p>
+<p><label class="inline" for="ch-enabled"><input id="ch-enabled" type="checkbox" name="enabled" value="1"${c.enabled ? ' checked' : ''}> <span>Forward channel messages to my assistant</span></label></p>
+<p><label class="inline" for="ch-mentions"><input id="ch-mentions" type="checkbox" name="mentions" value="1"${c.mentions ? ' checked' : ''}> <span>Forward messages that mention me</span></label></p>
+<div class="field"><label for="ch-allow">Always forward these channel IDs</label><input id="ch-allow" type="text" name="allowlist" autocomplete="off" value="${esc(c.allowlist.join(' '))}"><span class="hint">Slack channel IDs starting with C or G, separated by spaces or commas, up to 10.</span></div>
+</fieldset>
+<p><button type="submit" class="btn-secondary">Save channel settings</button></p>
+</form>`;
+}
+
 function voiceBlock(csrf, manage) {
   const used = [...manage.voice].length;
   return `${msgLine(manage.profileMsg)}
@@ -349,6 +368,10 @@ function requestForm(csrf, r) {
 <p><label class="inline" for="c-${esc(r.id)}"><input id="c-${esc(r.id)}" type="checkbox" name="confirm_send" value="1"> <span>I understand that a hostile DM could steer an assistant that is allowed to send.</span></label></p>
 <div class="field"><label for="w-${esc(r.id)}">Type SEND to confirm</label><input id="w-${esc(r.id)}" type="text" name="send_word" autocomplete="off"></div>
 <p><button type="submit" class="btn-danger">Approve and turn send on</button></p></form>`;
+  } else if (r.type === 'enable_channels') {
+    const ids = (r.detail && r.detail.allowlist) || [];
+    detail = banner('warning', `<strong>Channel messages.</strong><p>Approving lets the relay forward public and private channel messages that mention you${ids.length ? ' and every message in these channels: ' + ids.map((i) => `<code>${esc(i)}</code>`).join(' ') : ''} to your destination. Private channel content becomes visible to the relay for your account. Shared channels with other workspaces are never forwarded.</p>`);
+    approve = `<form method="post" action="/requests/approve">${hid}<p><button type="submit" class="btn-primary">Approve and turn channels on</button></p></form>`;
   } else {
     const ids = (r.detail && r.detail.user_ids) || [];
     detail = `<p class="small">These Slack user IDs would be added to your trusted senders: ${ids.map((i) => `<code>${esc(i)}</code>`).join(' ')}</p>`;
@@ -405,6 +428,7 @@ ${fold('connection', 'Connection', connection, true)}
 ${fold('requests', 'Pending requests from your assistant', requestsBlock(csrf, manage), manage.requests.some((r) => r.status === 'pending'))}
 ${fold('keys', 'Assistant keys', keysBlock(csrf, manage))}
 ${fold('filters', 'Filters and trusted senders', `${filtersBlock(csrf, manage)}${manage.destination ? trustedBlock(csrf, manage) : ''}`)}
+${manage.destination ? fold('channels', 'Channels', channelsBlock(csrf, manage)) : ''}
 ${manage.destination ? fold('voice', 'Voice', voiceBlock(csrf, manage)) : ''}
 ${fold('prompts', 'Automation prompts', promptsBlock(manage))}`;
   return htmlResponse('Destination', body, { status: error ? 400 : 200, script: COPY_SCRIPT });

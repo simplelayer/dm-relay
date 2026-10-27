@@ -1,5 +1,5 @@
 import { FILTER_KEYWORD_MAX_LENGTH, FILTER_MAX_KEYWORDS, FILTER_MAX_USERS } from './constants.js';
-import { effectiveCaps, effectiveTrusted, normalizeIds, splitIds } from './caps.js';
+import { effectiveCaps, effectiveChannels, effectiveTrusted, normalizeIds, splitIds } from './caps.js';
 import { isUserId } from './routes.js';
 
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
@@ -8,7 +8,24 @@ export function checkEnvelope(payload, { teamId, appId }) {
   return Boolean(payload) && payload.team_id === teamId && payload.api_app_id === appId;
 }
 
-export function filterMessageEvent(payload, { allowBots = false } = {}) {
+export function isChannelEvent(ev) {
+  return Boolean(ev) && (ev.channel_type === 'channel' || ev.channel_type === 'group');
+}
+
+export function mentionsUser(text, userId) {
+  return typeof text === 'string' && (text.includes(`<@${userId}>`) || text.includes(`<@${userId}|`));
+}
+
+export function applyChannelPolicy(ev, userId, rawChannels) {
+  const c = effectiveChannels(rawChannels);
+  if (!c.enabled) return { forward: false, reason: 'channels_off' };
+  if (ev.is_ext_shared_channel === true) return { forward: false, reason: 'external' };
+  if (c.mentions && mentionsUser(ev.text, userId)) return { forward: true, reason: 'mention' };
+  if (c.allowlist.includes(ev.channel)) return { forward: true, reason: 'allowlist' };
+  return { forward: false, reason: 'no_match' };
+}
+
+export function filterMessageEvent(payload, { allowBots = false, allowChannels = false } = {}) {
   const ev = payload && payload.event;
   if (!ev || typeof ev !== 'object') return { forward: false, reason: 'no_event' };
   if (ev.type !== 'message') return { forward: false, reason: 'type' };
@@ -18,7 +35,9 @@ export function filterMessageEvent(payload, { allowBots = false } = {}) {
   if (typeof ev.user !== 'string' || ev.user === '' || ev.user === 'USLACKBOT') {
     return { forward: false, reason: 'user' };
   }
-  if (ev.channel_type !== 'im' && ev.channel_type !== 'mpim') return { forward: false, reason: 'channel_type' };
+  if (ev.channel_type !== 'im' && ev.channel_type !== 'mpim' && !(allowChannels && isChannelEvent(ev))) {
+    return { forward: false, reason: 'channel_type' };
+  }
   if (payload.is_ext_shared_channel === true || ev.is_ext_shared_channel === true) {
     return { forward: false, reason: 'external' };
   }
@@ -29,12 +48,14 @@ export function filterMessageEvent(payload, { allowBots = false } = {}) {
   return { forward: true, reason: 'ok' };
 }
 
-export function buildForwardPayload(payload, nowMs, entry = {}) {
+const FORWARD_TYPES = { im: 'dm', mpim: 'group_dm', channel: 'channel', group: 'private_channel' };
+
+export function buildForwardPayload(payload, nowMs, entry = {}, recipientId = '') {
   const ev = payload.event;
-  return {
+  const out = {
     event_id: payload.event_id,
     received_at: new Date(nowMs).toISOString(),
-    type: ev.channel_type === 'im' ? 'dm' : 'group_dm',
+    type: FORWARD_TYPES[ev.channel_type] || 'group_dm',
     channel_id: ev.channel,
     sender_id: ev.user,
     text: typeof ev.text === 'string' ? ev.text : '',
@@ -43,6 +64,8 @@ export function buildForwardPayload(payload, nowMs, entry = {}) {
     mode: effectiveCaps(entry.caps),
     sender_trusted: effectiveTrusted(entry.trusted_users).includes(ev.user)
   };
+  if (isChannelEvent(ev)) out.mentioned = mentionsUser(ev.text, recipientId);
+  return out;
 }
 
 export function effectiveFilters(raw) {

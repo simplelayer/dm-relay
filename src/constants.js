@@ -1,6 +1,7 @@
 export const SLACK_TIMESTAMP_WINDOW_S = 300;
 
 export const REQUIRED_SCOPES = ['im:history', 'mpim:history'];
+export const OPTIONAL_CHANNEL_SCOPES = ['channels:history', 'groups:history'];
 export const SLACK_AUTHORIZE_URL = 'https://slack.com/oauth/v2/authorize';
 export const SLACK_API = 'https://slack.com/api';
 
@@ -61,7 +62,8 @@ export const LIMITS = {
   profile: { limit: 10, windowMs: 60000 },
   keys: { limit: 10, windowMs: 60000 },
   requests: { limit: 10, windowMs: 60000 },
-  decide: { limit: 10, windowMs: 60000 }
+  decide: { limit: 10, windowMs: 60000 },
+  channels: { limit: 10, windowMs: 60000 }
 };
 
 export const FILTER_MAX_KEYWORDS = 20;
@@ -72,13 +74,14 @@ export const FILTER_COUNTER_NAMES = ['filtered_bot', 'filtered_sender', 'filtere
 export const CAPS_DEFAULT = { process: true, draft: true, send: false };
 export const SEND_WORD = 'SEND';
 export const TRUSTED_MAX = 50;
+export const CHANNEL_ALLOWLIST_MAX = 10;
 export const VOICE_MAX = 2000;
 export const API_KEY_MAX = 2;
 export const API_KEY_LABEL_MAX = 40;
 export const API_BODY_MAX = 8192;
 export const API_RATE = { limit: 60, windowMs: 60000 };
 export const CHANGE_LOG_MAX = 20;
-export const REQUEST_TYPES = ['destination', 'enable_send', 'add_trusted'];
+export const REQUEST_TYPES = ['destination', 'enable_send', 'add_trusted', 'enable_channels'];
 export const REQUEST_TTL_MS = 86400000;
 export const REQUEST_MAX_PENDING = 5;
 export const REQUEST_MAX_KEPT = 20;
@@ -90,5 +93,8 @@ export const CHANGE_FIELDS = [
   'filters',
   'trusted_users',
   'voice',
+  'channels.enabled',
+  'channels.mentions',
+  'channels.allowlist',
   ...REQUEST_TYPES.flatMap((t) => [`request:${t}`, `request:${t}:rejected`])
 ];

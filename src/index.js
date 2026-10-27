@@ -10,6 +10,7 @@ import {
   handleKeyCreate,
   handleKeyRevoke,
   handleProfile,
+  handleChannels,
   handleRequestApprove,
   handleRequestReject,
   handleTestFire,
@@ -64,6 +65,7 @@ export async function route(request, deps, waitUntil) {
   if (method === 'POST' && pathname === '/filters') return handleFilters(request, deps);
   if (method === 'POST' && pathname === '/caps') return handleCaps(request, deps);
   if (method === 'POST' && pathname === '/profile') return handleProfile(request, deps);
+  if (method === 'POST' && pathname === '/channels') return handleChannels(request, deps);
   if (method === 'POST' && pathname === '/keys/create') return handleKeyCreate(request, deps);
   if (method === 'POST' && pathname === '/keys/revoke') return handleKeyRevoke(request, deps);
   if (method === 'POST' && pathname === '/keys/bootstrap') return handleBootstrap(request, deps);
@@ -73,7 +75,7 @@ export async function route(request, deps, waitUntil) {
   if (method === 'POST' && pathname === '/disconnect/confirm') return handleDisconnectConfirm(request, deps);
   if (method === 'GET' && pathname === '/oauth/callback') return handleCallback(request, deps);
   if (method === 'GET' && (pathname === '/connect' || pathname === '/disconnect' || pathname === '/status')) {
-    return startFlow(pathname.slice(1), deps);
+    return startFlow(pathname.slice(1), deps, { channels: new URL(request.url).searchParams.get('channels') === '1' });
   }
   return messagePage('Not found', 'Nothing here.', 404);
 }

@@ -1,6 +1,6 @@
 import { destLabel, outcomeLabel } from './delivery-log.js';
 import { fireTest } from './destinations.js';
-import { effectiveCaps, effectiveTrusted, effectiveVoice } from './caps.js';
+import { effectiveCaps, effectiveChannels, effectiveTrusted, effectiveVoice } from './caps.js';
 import { effectiveFilters } from './filter.js';
 
 export function describeDestination(route, labels) {
@@ -24,6 +24,11 @@ export function changedFields(route, next) {
   if (next.filters && differs(effectiveFilters(route.filters), effectiveFilters(next.filters))) out.push('filters');
   if (next.trusted_users && differs(effectiveTrusted(route.trusted_users), next.trusted_users)) out.push('trusted_users');
   if (typeof next.voice === 'string' && effectiveVoice(route.voice) !== next.voice) out.push('voice');
+  if (next.channels) {
+    const was = effectiveChannels(route.channels);
+    const now = effectiveChannels(next.channels);
+    for (const k of ['enabled', 'mentions', 'allowlist']) if (differs(was[k], now[k])) out.push(`channels.${k}`);
+  }
   return out;
 }
 
@@ -34,6 +39,7 @@ export async function saveSettings(deps, userId, route, next, via) {
   if (next.filters) entry.filters = effectiveFilters(next.filters);
   if (next.trusted_users) entry.trusted_users = next.trusted_users;
   if (typeof next.voice === 'string') entry.voice = next.voice;
+  if (next.channels) entry.channels = effectiveChannels(next.channels);
   await deps.routing.put(userId, entry);
   if (fields.length > 0) await deps.userDo(userId).logChange({ via, fields });
   return { entry, fields };

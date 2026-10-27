@@ -1,6 +1,6 @@
-import { DISCONNECT_SESSION_TTL_S, REQUIRED_SCOPES, SESSION_TTL_S, SLACK_API, SLACK_AUTHORIZE_URL, STATE_TTL_S } from './constants.js';
+import { DISCONNECT_SESSION_TTL_S, OPTIONAL_CHANNEL_SCOPES, REQUIRED_SCOPES, SESSION_TTL_S, SLACK_API, SLACK_AUTHORIZE_URL, STATE_TTL_S } from './constants.js';
 import { API_KEY_LABEL_MAX, TRUSTED_MAX } from './constants.js';
-import { effectiveCaps, effectiveTrusted, effectiveVoice, normalizeIds, parseCapsForm, parseProfileForm } from './caps.js';
+import { CHANNEL_SCOPE_ERROR, effectiveCaps, effectiveChannels, effectiveTrusted, effectiveVoice, hasChannelScopes, normalizeIds, parseCapsForm, parseChannelsForm, parseProfileForm } from './caps.js';
 import { hashKey, newKeyMaterial } from './apikeys.js';
 import { destLabel } from './delivery-log.js';
 import { verifyClaude, verifyCursor, verifyGrok } from './destinations.js';
@@ -45,6 +45,8 @@ async function manageFor(userId, deps, extra = {}) {
     caps: effectiveCaps(route && route.caps),
     trusted_users: effectiveTrusted(route && route.trusted_users),
     voice: effectiveVoice(route && route.voice),
+    channels: effectiveChannels(route && route.channels),
+    channelScopes: hasChannelScopes(route && route.scopes),
     keys: keys.keys,
     specUrl: `${deps.config.baseUrl}/api/v1/spec`,
     prompts: allPromptsFor(route),
@@ -66,13 +68,13 @@ export function csrfFor(deps, sessionId) {
   return mac(deps, `csrf|${sessionId}`);
 }
 
-export async function startFlow(intent, deps) {
+export async function startFlow(intent, deps, { channels = false } = {}) {
   const state = randomBase64Url(32);
   const sig = await mac(deps, `state|${state}|${intent}`);
   const cookie = `${STATE_COOKIE_PREFIX}${state.slice(0, 10)}=${state}.${intent}.${sig}; ${ATTRS}; Path=/oauth/callback; Max-Age=${STATE_TTL_S}`;
   const params = new URLSearchParams({
     client_id: deps.config.clientId,
-    user_scope: REQUIRED_SCOPES.join(','),
+    user_scope: (channels && intent === 'connect' ? [...REQUIRED_SCOPES, ...OPTIONAL_CHANNEL_SCOPES] : REQUIRED_SCOPES).join(','),
     redirect_uri: `${deps.config.baseUrl}/oauth/callback`,
     state,
     team: deps.config.teamId
@@ -81,7 +83,8 @@ export async function startFlow(intent, deps) {
     intent,
     authorizeUrl: `${SLACK_AUTHORIZE_URL}?${params}`,
     cookie,
-    publicRepoUrl: deps.config.publicRepoUrl
+    publicRepoUrl: deps.config.publicRepoUrl,
+    channels: channels && intent === 'connect'
   });
 }
 
@@ -107,7 +110,7 @@ async function exchangeCode(code, deps) {
     if (!au || typeof au.id !== 'string' || au.token_type !== 'user' || typeof au.access_token !== 'string') return null;
     const scopes = String(au.scope || '').split(',');
     if (!REQUIRED_SCOPES.every((s) => scopes.includes(s))) return null;
-    return { userId: au.id, token: au.access_token };
+    return { userId: au.id, token: au.access_token, scopes: hasChannelScopes(scopes) ? scopes : undefined };
   } catch {
     return null;
   }
@@ -177,7 +180,7 @@ export async function handleCallback(request, deps) {
 
   const result = await exchangeCode(code, deps);
   if (!result) return messagePage('Sign-in failed', 'Slack sign-in failed. Please start again.', 400, [clear]);
-  const { userId, token } = result;
+  const { userId, token, scopes } = result;
 
   if (intent === 'status') {
     const st = await deps.userDo(userId).status();
@@ -192,8 +195,15 @@ export async function handleCallback(request, deps) {
     res.headers.append('set-cookie', clear);
     return res;
   }
-  if (intent === 'connect') await deps.userDo(userId).markConnecting();
-  const record = intent === 'disconnect' ? { uid: userId, intent, token } : { uid: userId, intent };
+  if (intent === 'connect') {
+    await deps.userDo(userId).markConnecting();
+    const existing = await deps.routing.get(userId);
+    if (existing && JSON.stringify(existing.scopes) !== JSON.stringify(scopes)) {
+      const { scopes: _old, ...rest } = existing;
+      await deps.routing.put(userId, scopes ? { ...rest, scopes } : rest);
+    }
+  }
+  const record = intent === 'disconnect' ? { uid: userId, intent, token } : intent === 'connect' && scopes ? { uid: userId, intent, scopes } : { uid: userId, intent };
   const { sid, cookie } = await mintSession(record, deps);
   const csrf = await csrfFor(deps, sid);
   const res = intent === 'connect' ? destinationFormPage({ csrf, manage: await manageFor(userId, deps) }) : disconnectConfirmPage({ csrf });
@@ -247,7 +257,8 @@ export async function handleDestination(request, deps) {
     secret_or_bearer: checked.secret,
     mode: destType === 'claude_routine' ? 'nudge' : 'full'
   };
-  for (const k of ['filters', 'caps', 'trusted_users', 'voice']) if (previous && previous[k] !== undefined) entry[k] = previous[k];
+  for (const k of ['filters', 'caps', 'trusted_users', 'voice', 'channels', 'scopes']) if (previous && previous[k] !== undefined) entry[k] = previous[k];
+  if (!entry.scopes && Array.isArray(session.rec.scopes)) entry.scopes = session.rec.scopes;
   const verifiers = {
     grok: () => verifyGrok({ entry, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts }),
     cursor: () => verifyCursor({ entry, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts }),
@@ -359,6 +370,20 @@ export function handleProfile(request, deps) {
   });
 }
 
+export function handleChannels(request, deps) {
+  return settingsAction(request, deps, {
+    limit: 'channels',
+    forbidden: 'This session cannot change channel settings.',
+    noRoute: 'Save a destination before setting channels.',
+    async apply({ form, route, userId, page }) {
+      const parsed = parseChannelsForm(form, route);
+      if (parsed.error) return page(parsed.error);
+      await saveSettings(deps, userId, route, { channels: parsed.channels }, 'browser');
+      return page(undefined, { channelsMsg: { text: 'Channel settings saved.' } });
+    }
+  });
+}
+
 async function issueKey(deps, userId, label) {
   const { key, kid } = newKeyMaterial();
   const hash = await hashKey(key);
@@ -431,7 +456,7 @@ async function applyRequest(deps, userId, rec, form) {
     if (checked.error) return checked.error;
     if (!(await doc.consumeRegistration()).allowed) return 'Too many registration attempts. Please try again later.';
     const entry = { dest_type: p.dest_type, url: checked.url, secret_or_bearer: checked.secret, mode: p.dest_type === 'claude_routine' ? 'nudge' : 'full' };
-    for (const k of ['filters', 'caps', 'trusted_users', 'voice']) if (route && route[k] !== undefined) entry[k] = route[k];
+    for (const k of ['filters', 'caps', 'trusted_users', 'voice', 'channels', 'scopes']) if (route && route[k] !== undefined) entry[k] = route[k];
     const verified = await VERIFIERS[p.dest_type](entry, deps);
     if (verified.kind !== 'ok') return `Verification failed (${verified.kind}${verified.status ? ` ${verified.status}` : ''}). The request is still pending; you can try again.`;
     const lost = await claim();
@@ -455,6 +480,14 @@ async function applyRequest(deps, userId, rec, form) {
     const lost = await claim();
     if (lost) return lost;
     await deps.routing.put(userId, { ...route, caps: parsed.caps });
+    return null;
+  }
+  if (rec.type === 'enable_channels') {
+    if (!hasChannelScopes(route.scopes)) return `${CHANNEL_SCOPE_ERROR} The request is still pending.`;
+    const lost = await claim();
+    if (lost) return lost;
+    const was = effectiveChannels(route.channels);
+    await deps.routing.put(userId, { ...route, channels: { ...was, enabled: true, allowlist: Array.isArray(p.allowlist) ? p.allowlist : was.allowlist } });
     return null;
   }
   const merged = normalizeIds([...effectiveTrusted(route.trusted_users), ...p.user_ids], TRUSTED_MAX);

@@ -1,5 +1,5 @@
 import { REQUEST_TRUSTED_MAX, REQUEST_TYPES } from './constants.js';
-import { normalizeIds } from './caps.js';
+import { normalizeChannelIds, normalizeIds } from './caps.js';
 import { isValidCursorToken } from './destinations.js';
 import { isValidSecret } from './standard-webhooks.js';
 import { validateDestinationUrl } from './ssrf.js';
@@ -24,15 +24,31 @@ export function checkDestinationInput({ destType, url, secret }, validateOpts) {
 }
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-const FIELDS = { destination: ['type', 'dest_type', 'url', 'secret'], enable_send: ['type'], add_trusted: ['type', 'user_ids'] };
+const FIELDS = { destination: ['type', 'dest_type', 'url', 'secret'], enable_send: ['type'], add_trusted: ['type', 'user_ids'], enable_channels: ['type', 'allowlist'] };
 
 export function parseRequestBody(body, validateOpts) {
   if (!isObject(body)) return { error: 'The body must be a JSON object.' };
-  if (!REQUEST_TYPES.includes(body.type)) return { error: 'type must be destination, enable_send or add_trusted.' };
+  if (!REQUEST_TYPES.includes(body.type)) return { error: 'type must be destination, enable_send, add_trusted or enable_channels.' };
   const unknown = Object.keys(body).find((k) => !FIELDS[body.type].includes(k));
   if (unknown !== undefined) return { error: `Unknown field: ${unknown.slice(0, 40)}` };
   if (body.type === 'enable_send') {
     return { type: 'enable_send', payload: {}, detail: {}, summary: 'Allow your assistant to send replies on your behalf (turn Send on).' };
+  }
+  if (body.type === 'enable_channels') {
+    let ids = null;
+    if (body.allowlist !== undefined) {
+      if (!Array.isArray(body.allowlist)) return { error: 'allowlist must be an array of Slack channel IDs.' };
+      const a = normalizeChannelIds(body.allowlist);
+      if (a.error) return { error: a.error };
+      ids = a.ids;
+    }
+    const where = ids && ids.length ? ` Always forward these channels: ${ids.join(', ')}.` : '';
+    return {
+      type: 'enable_channels',
+      payload: ids ? { allowlist: ids } : {},
+      detail: { allowlist: ids || [] },
+      summary: `Forward Slack channel messages (public and private) that mention you.${where}`
+    };
   }
   if (body.type === 'add_trusted') {
     if (!Array.isArray(body.user_ids) || body.user_ids.length === 0) return { error: 'user_ids must be a non-empty array.' };

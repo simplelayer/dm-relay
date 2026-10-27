@@ -449,7 +449,7 @@ test('F: GET settings returns the documented shape and never secrets, the URL pa
   assert.equal(res.headers.get('cache-control'), 'no-store');
   const text = await res.text();
   const body = JSON.parse(text);
-  assert.deepEqual(Object.keys(body), ['connected', 'destination', 'caps', 'filters', 'trusted_users', 'voice', 'api_keys']);
+  assert.deepEqual(Object.keys(body), ['connected', 'destination', 'caps', 'filters', 'trusted_users', 'voice', 'channels', 'channel_scopes_granted', 'api_keys']);
   assert.deepEqual(body.destination, { type: 'grok', host: `hooks.x.ai` });
   assert.deepEqual(body.caps, { process: true, draft: true, send: false });
   assert.deepEqual(body.trusted_users, [U2]);

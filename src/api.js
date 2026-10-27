@@ -1,6 +1,6 @@
-import { API_BODY_MAX, API_KEY_MAX, API_RATE, CHANGE_LOG_MAX, REQUEST_MAX_PENDING, REQUEST_TRUSTED_MAX, REQUEST_TTL_MS, FILTER_KEYWORD_MAX_LENGTH, FILTER_MAX_KEYWORDS, FILTER_MAX_USERS, LIMITS, TRUSTED_MAX, VOICE_MAX } from './constants.js';
+import { API_BODY_MAX, API_KEY_MAX, CHANNEL_ALLOWLIST_MAX, API_RATE, CHANGE_LOG_MAX, REQUEST_MAX_PENDING, REQUEST_TRUSTED_MAX, REQUEST_TTL_MS, FILTER_KEYWORD_MAX_LENGTH, FILTER_MAX_KEYWORDS, FILTER_MAX_USERS, LIMITS, TRUSTED_MAX, VOICE_MAX } from './constants.js';
 import { hashKey, KEY_PATTERN } from './apikeys.js';
-import { cleanVoice, effectiveCaps, effectiveTrusted, effectiveVoice, normalizeIds } from './caps.js';
+import { CHANNEL_SCOPE_ERROR, cleanVoice, effectiveCaps, effectiveChannels, effectiveTrusted, effectiveVoice, hasChannelScopes, normalizeChannelIds, normalizeIds } from './caps.js';
 import { effectiveFilters, validateFilters } from './filter.js';
 import { PROMPT_TYPES, buildPrompt } from './prompts.js';
 import { newRequestId, parseRequestBody } from './requests.js';
@@ -35,6 +35,7 @@ function specDoc(baseUrl) {
       request_body_max_bytes: API_BODY_MAX,
       active_keys_per_user: API_KEY_MAX,
       trusted_users_max: TRUSTED_MAX,
+      channel_allowlist_max: CHANNEL_ALLOWLIST_MAX,
       voice_max_characters: VOICE_MAX,
       filters: { skip_users_max: FILTER_MAX_USERS, keywords_max: FILTER_MAX_KEYWORDS, keyword_max_characters: FILTER_KEYWORD_MAX_LENGTH },
       test_per_minute: LIMITS.test.limit,
@@ -46,7 +47,7 @@ function specDoc(baseUrl) {
     },
     endpoints: [
       { method: 'GET', path: '/api/v1/spec', auth: false, description: 'This document.' },
-      { method: 'GET', path: '/api/v1/settings', auth: true, description: 'Current settings: connected, destination (type and host only), caps, filters, trusted_users, voice, api_keys (label, created, last_used).' },
+      { method: 'GET', path: '/api/v1/settings', auth: true, description: 'Current settings: connected, destination (type and host only), caps, filters, trusted_users, voice, channels ({enabled, mentions, allowlist}), channel_scopes_granted, api_keys (label, created, last_used).' },
       {
         method: 'PATCH',
         path: '/api/v1/settings',
@@ -58,7 +59,8 @@ function specDoc(baseUrl) {
           'caps.send': 'may only be false. true returns 403: sending can only be enabled in the browser.',
           filters: { skip_bots: 'boolean', skip_users: 'array of Slack user IDs', keywords: 'array of strings' },
           trusted_users: 'array of Slack user IDs already on the list. The API can only remove trusted senders; adding one returns 403 and must be done in the browser.',
-          voice: 'string; control characters other than newline are removed'
+          voice: 'string; control characters other than newline are removed',
+          channels: { enabled: 'may only be false. true returns 403: channels are enabled by the user in the browser, or by an approval request of type enable_channels.', mentions: 'boolean', allowlist: `array of up to ${CHANNEL_ALLOWLIST_MAX} Slack channel IDs (C or G prefix); editable only while channels are already enabled, otherwise 403` }
         }
       },
       { method: 'GET', path: '/api/v1/prompt?type=cursor|grok|claude_routine', auth: true, description: 'The current generated automation prompt. type defaults to the saved destination type.' },
@@ -73,7 +75,8 @@ function specDoc(baseUrl) {
         types: {
           destination: { dest_type: 'grok | cursor | claude_routine', url: 'the webhook or fire URL (validated now, contacted only after approval)', secret: 'signing secret or bearer token (held only inside the pending request, never returned by any response)' },
           enable_send: {},
-          add_trusted: { user_ids: 'array of 1 to 10 Slack user IDs' }
+          add_trusted: { user_ids: 'array of 1 to 10 Slack user IDs' },
+          enable_channels: { allowlist: `optional array of up to ${CHANNEL_ALLOWLIST_MAX} Slack channel IDs; requires the user to have re-authorized with channels:history and groups:history, otherwise 409` }
         }
       },
       { method: 'GET', path: '/api/v1/requests', auth: true, description: 'Your requests: id, type, summary, status (pending, approved, rejected, expired, cancelled), created, expires. Never secrets.' },
@@ -87,8 +90,9 @@ function specDoc(baseUrl) {
     ],
     cannot: [
       'enable caps.send',
+      'turn channels.enabled on (it can only turn it off, or propose enable_channels as an approval request)',
       'add trusted senders directly (it can only remove them, or propose additions as an approval request)',
-      'approve, reject or apply a request: destination, send and trusted-sender additions are applied only by the human in the browser',
+      'approve, reject or apply a request: destination, send, enable_channels and trusted-sender additions are applied only by the human in the browser',
       'change the destination URL, secret or type',
       'create or revoke assistant keys',
       'disconnect or delete the user',
@@ -141,11 +145,13 @@ async function settingsView(userId, deps) {
     filters: effectiveFilters(route && route.filters),
     trusted_users: effectiveTrusted(route && route.trusted_users),
     voice: effectiveVoice(route && route.voice),
+    channels: effectiveChannels(route && route.channels),
+    channel_scopes_granted: hasChannelScopes(route && route.scopes),
     api_keys: keys.map((k) => ({ label: k.label, created: iso(k.created), last_used: iso(k.last_used) }))
   };
 }
 
-const TOP_FIELDS = ['caps', 'filters', 'trusted_users', 'voice'];
+const TOP_FIELDS = ['caps', 'filters', 'trusted_users', 'voice', 'channels'];
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const bad = (message) => ({ status: 400, message });
 const unknownIn = (obj, allowed, prefix) => {
@@ -186,6 +192,25 @@ function parsePatch(body, route) {
       return { status: 403, message: 'Adding trusted senders can only be done in the browser at /connect. The API can only remove them.' };
     }
     next.trusted_users = t.ids;
+  }
+  if (body.channels !== undefined) {
+    if (!isObject(body.channels)) return bad('channels must be an object.');
+    const u = unknownIn(body.channels, ['enabled', 'mentions', 'allowlist'], 'channels.');
+    if (u) return u;
+    const was = effectiveChannels(route.channels);
+    for (const k of ['enabled', 'mentions']) if (body.channels[k] !== undefined && typeof body.channels[k] !== 'boolean') return bad(`channels.${k} must be true or false.`);
+    if (body.channels.enabled === true && !was.enabled) {
+      return { status: 403, message: 'Channels can only be enabled by the user in the browser at /connect, or through an approval request of type enable_channels.' };
+    }
+    let allowlist = was.allowlist;
+    if (body.channels.allowlist !== undefined) {
+      if (!was.enabled) return { status: 403, message: 'The channel allowlist can only be edited through the API after the user has enabled channels in the browser.' };
+      if (!Array.isArray(body.channels.allowlist)) return bad('channels.allowlist must be an array.');
+      const a = normalizeChannelIds(body.channels.allowlist);
+      if (a.error) return bad(a.error);
+      allowlist = a.ids;
+    }
+    next.channels = { enabled: body.channels.enabled === undefined ? was.enabled : body.channels.enabled, mentions: body.channels.mentions === undefined ? was.mentions : body.channels.mentions, allowlist };
   }
   if (body.voice !== undefined) {
     const v = cleanVoice(body.voice);
@@ -314,6 +339,10 @@ async function handleRequests(deps, userId, pathname, method, body) {
   const route = await deps.routing.get(userId);
   if (req.type !== 'destination' && !route) return fail(409, 'not_connected', 'Save a destination first.');
   if (req.type === 'enable_send' && effectiveCaps(route.caps).send) return fail(409, 'already_enabled', 'Send is already on.');
+  if (req.type === 'enable_channels') {
+    if (effectiveChannels(route.channels).enabled) return fail(409, 'already_enabled', 'Channels are already on.');
+    if (!hasChannelScopes(route.scopes)) return fail(409, 'scopes_missing', CHANNEL_SCOPE_ERROR);
+  }
   const made = await doc.reqCreate({ id: newRequestId(), type: req.type, summary: req.summary, detail: req.detail, payload: req.payload });
   if (!made.ok) return fail(409, 'too_many_pending', `At most ${REQUEST_MAX_PENDING} requests can be pending. Cancel one or wait for the user.`);
   return json({ id: made.id, type: made.type, status: 'pending', expires: iso(made.expires) }, made.duplicate ? 200 : 201);
@@ -359,7 +388,7 @@ export async function handleApi(request, deps, pathname) {
     const route = await deps.routing.get(userId);
     const type = new URL(request.url).searchParams.get('type') || (route && route.dest_type);
     if (!TYPES.includes(type)) return fail(400, 'bad_request', 'type must be cursor, grok or claude_routine.');
-    return json({ type, prompt: buildPrompt({ type, caps: route && route.caps, voice: route && route.voice, trusted: route && route.trusted_users }) });
+    return json({ type, prompt: buildPrompt({ type, caps: route && route.caps, voice: route && route.voice, trusted: route && route.trusted_users, channels: route && route.channels }) });
   }
   if (pathname === '/api/v1/status') {
     const [st, route] = await Promise.all([deps.userDo(userId).status(), deps.routing.get(userId)]);

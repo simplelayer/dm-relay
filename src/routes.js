@@ -1,8 +1,13 @@
 const PREFIX = 'route:';
 const USER_ID = /^[UW][A-Z0-9]{2,31}$/;
+const CHANNEL_ID = /^[CG][A-Z0-9]{2,31}$/;
 
 export function isUserId(id) {
   return typeof id === 'string' && USER_ID.test(id);
+}
+
+export function isChannelId(id) {
+  return typeof id === 'string' && CHANNEL_ID.test(id);
 }
 
 export function kvRouting(kv) {
