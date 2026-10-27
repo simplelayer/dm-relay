@@ -1,5 +1,17 @@
 import { handleSlackEvents } from './events.js';
-import { handleCallback, handleDestination, handleDisconnectConfirm, handleFilters, handleTestFire, startFlow } from './oauth.js';
+import { handleApi } from './api.js';
+import {
+  handleCallback,
+  handleCaps,
+  handleDestination,
+  handleDisconnectConfirm,
+  handleFilters,
+  handleKeyCreate,
+  handleKeyRevoke,
+  handleProfile,
+  handleTestFire,
+  startFlow
+} from './oauth.js';
 import { messagePage } from './pages.js';
 import { kvRouting } from './routes.js';
 import { parseOwnHosts } from './ssrf.js';
@@ -47,6 +59,11 @@ export async function route(request, deps, waitUntil) {
   if (method === 'POST' && pathname === '/destination') return handleDestination(request, deps);
   if (method === 'POST' && pathname === '/destination/test') return handleTestFire(request, deps);
   if (method === 'POST' && pathname === '/filters') return handleFilters(request, deps);
+  if (method === 'POST' && pathname === '/caps') return handleCaps(request, deps);
+  if (method === 'POST' && pathname === '/profile') return handleProfile(request, deps);
+  if (method === 'POST' && pathname === '/keys/create') return handleKeyCreate(request, deps);
+  if (method === 'POST' && pathname === '/keys/revoke') return handleKeyRevoke(request, deps);
+  if (pathname.startsWith('/api/v1/')) return handleApi(request, deps, pathname);
   if (method === 'POST' && pathname === '/disconnect/confirm') return handleDisconnectConfirm(request, deps);
   if (method === 'GET' && pathname === '/oauth/callback') return handleCallback(request, deps);
   if (method === 'GET' && (pathname === '/connect' || pathname === '/disconnect' || pathname === '/status')) {

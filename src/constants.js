@@ -13,7 +13,8 @@ export const MIN_RETRY_BUDGET_MS = 1500;
 export const NUDGE_INTERVAL_MS = 300000;
 export const NUDGE_RETRY_DELAY_MS = 30000;
 
-export const SESSION_TTL_S = 600;
+export const SESSION_TTL_S = 3600;
+export const DISCONNECT_SESSION_TTL_S = 600;
 export const STATE_TTL_S = 600;
 export const REGISTRATION_LIMIT = 5;
 export const REGISTRATION_WINDOW_MS = 3600000;
@@ -55,10 +56,24 @@ export const STATS_HOURS = 24;
 
 export const LIMITS = {
   test: { limit: 3, windowMs: 60000 },
-  filters: { limit: 10, windowMs: 60000 }
+  filters: { limit: 10, windowMs: 60000 },
+  caps: { limit: 10, windowMs: 60000 },
+  profile: { limit: 10, windowMs: 60000 },
+  keys: { limit: 10, windowMs: 60000 }
 };
 
 export const FILTER_MAX_KEYWORDS = 20;
 export const FILTER_KEYWORD_MAX_LENGTH = 50;
 export const FILTER_MAX_USERS = 50;
 export const FILTER_COUNTER_NAMES = ['filtered_bot', 'filtered_sender', 'filtered_keyword'];
+
+export const CAPS_DEFAULT = { process: true, draft: true, send: false };
+export const SEND_WORD = 'SEND';
+export const TRUSTED_MAX = 50;
+export const VOICE_MAX = 2000;
+export const API_KEY_MAX = 2;
+export const API_KEY_LABEL_MAX = 40;
+export const API_BODY_MAX = 8192;
+export const API_RATE = { limit: 60, windowMs: 60000 };
+export const CHANGE_LOG_MAX = 20;
+export const CHANGE_FIELDS = ['caps.process', 'caps.draft', 'caps.send', 'filters', 'trusted_users', 'voice'];

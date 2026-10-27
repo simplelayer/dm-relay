@@ -83,12 +83,12 @@ test('full connect flow: session cookie, CSRF, destination verified and stored; 
   const l = await login(w);
   assert.equal(l.res.status, 200);
   const sess = setCookies(l.res).find((c) => c.startsWith('dmr_sess='));
-  for (const a of ['HttpOnly', 'Secure', 'SameSite=Lax', 'Max-Age=600']) assert.ok(sess.includes(a), a);
+  for (const a of ['HttpOnly', 'Secure', 'SameSite=Lax', 'Max-Age=3600']) assert.ok(sess.includes(a), a);
   assert.ok(setCookies(l.res).some((c) => c.startsWith('dmr_st_') && c.includes('Max-Age=0') && c.includes('Path=/oauth/callback')));
   assert.equal(l.html.includes(USER_TOKEN), false);
   assert.ok(l.csrf);
   assert.ok([...w.kv.store.values()].every((v) => !v.includes(USER_TOKEN)));
-  assert.ok([...w.kv.ttls.values()].every((t) => t === 600));
+  assert.ok([...w.kv.ttls.values()].every((t) => t === 600 || t === 3600));
 
   const res = await post(w, '/destination', l.cookie, grokFields(l.csrf));
   assert.equal(res.status, 200);
@@ -306,7 +306,6 @@ test('registration validation: secret prefix, attestations, claude token, dest t
   const l = await login(w);
   assert.equal((await post(w, '/destination', l.cookie, grokFields(l.csrf, { secret: 'plain' }))).status, 400);
   assert.equal((await post(w, '/destination', l.cookie, grokFields(l.csrf, { attest: '' }))).status, 400);
-  assert.equal((await post(w, '/destination', l.cookie, grokFields(l.csrf, { no_send: '' }))).status, 400);
   assert.equal((await post(w, '/destination', l.cookie, grokFields(l.csrf, { dest_type: 'claude_routine', url: ROUTINE_URL, secret: '' }))).status, 400);
   assert.equal((await post(w, '/destination', l.cookie, grokFields(l.csrf, { dest_type: 'webhook' }))).status, 400);
   assert.equal(await w.routing.get(U1), null);
@@ -342,11 +341,23 @@ test('per-user registration rate limit', async () => {
   assert.equal(w.fetchImpl.calls.length, calls);
 });
 
-test('expired session (older than 10 minutes) is rejected', async () => {
+test('connect session lasts one hour and is rejected after that', async () => {
   const w = world();
   const l = await login(w);
+  w.clock.t += 3599000;
+  assert.equal((await post(w, '/destination', l.cookie, grokFields(l.csrf))).status, 200);
+  const l2 = await login(w);
+  w.clock.t += 3601000;
+  assert.equal((await post(w, '/destination', l2.cookie, grokFields(l2.csrf))).status, 401);
+});
+
+test('a disconnect session (which holds a Slack token) still expires after 10 minutes', async () => {
+  const w = world();
+  const d = await login(w, 'disconnect');
+  const sess = setCookies(d.res).find((c) => c.startsWith('dmr_sess='));
+  assert.ok(sess.includes('Max-Age=600'));
   w.clock.t += 601000;
-  assert.equal((await post(w, '/destination', l.cookie, grokFields(l.csrf))).status, 401);
+  assert.equal((await post(w, '/disconnect/confirm', d.cookie, { csrf: d.csrf })).status, 401);
 });
 
 test('a status or disconnect session cannot register a destination', async () => {

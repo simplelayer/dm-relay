@@ -1,4 +1,9 @@
 import {
+  API_KEY_LABEL_MAX,
+  API_KEY_MAX,
+  API_RATE,
+  CHANGE_FIELDS,
+  CHANGE_LOG_MAX,
   COUNTER_NAMES,
   DELIVERY_LOG_MAX,
   FILTER_COUNTER_NAMES,
@@ -26,6 +31,12 @@ const METHODS = new Set([
   'consumeLimit',
   'recordDelivery',
   'recordFiltered',
+  'addKey',
+  'listKeys',
+  'keyHashes',
+  'revokeKey',
+  'consumeApiKey',
+  'logChange',
   'status',
   'wipe'
 ]);
@@ -118,6 +129,57 @@ export class UserDOCore {
     return { allowed: true };
   }
 
+  addKey({ kid, hash, label }) {
+    if (typeof kid !== 'string' || !/^[A-Za-z0-9_-]{8,32}$/.test(kid)) throw new Error('E_DO_KEY');
+    if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) throw new Error('E_DO_KEY');
+    if (typeof label !== 'string' || [...label].length > API_KEY_LABEL_MAX) throw new Error('E_DO_KEY');
+    const keys = this.s.get('keys') || [];
+    if (keys.length >= API_KEY_MAX) return { ok: false, error: 'max_keys' };
+    this.s.put('keys', [...keys, { kid, hash, label, created: this.now(), last_used: null }]);
+    return { ok: true };
+  }
+
+  listKeys() {
+    return { keys: (this.s.get('keys') || []).map(({ kid, label, created, last_used }) => ({ kid, label, created, last_used })) };
+  }
+
+  keyHashes() {
+    return { hashes: (this.s.get('keys') || []).map((k) => k.hash) };
+  }
+
+  revokeKey({ kid }) {
+    const keys = this.s.get('keys') || [];
+    const found = keys.find((k) => k.kid === kid);
+    if (!found) return { ok: false };
+    this.s.put('keys', keys.filter((k) => k.kid !== kid));
+    this.s.delete(`lim:k:${kid}`);
+    return { ok: true, hash: found.hash };
+  }
+
+  consumeApiKey({ kid, hash }) {
+    const keys = this.s.get('keys') || [];
+    const idx = keys.findIndex((k) => k.kid === kid && k.hash === hash);
+    if (idx < 0) return { exists: false, allowed: false };
+    const now = this.now();
+    const key = `lim:k:${kid}`;
+    let [start, count] = this.s.get(key) || [null, 0];
+    if (start == null || now - start >= API_RATE.windowMs) {
+      start = now;
+      count = 0;
+    }
+    if (count >= API_RATE.limit) return { exists: true, allowed: false };
+    this.s.put(key, [start, count + 1]);
+    this.s.put('keys', keys.map((k, i) => (i === idx ? { ...k, last_used: now } : k)));
+    return { exists: true, allowed: true };
+  }
+
+  logChange({ via, fields }) {
+    if (via !== 'browser' && via !== 'api') throw new Error('E_DO_CHANGE');
+    if (!Array.isArray(fields) || fields.length === 0 || !fields.every((f) => CHANGE_FIELDS.includes(f))) throw new Error('E_DO_CHANGE');
+    this.s.put('clog', [{ t: this.now(), via, fields: [...new Set(fields)] }, ...(this.s.get('clog') || [])].slice(0, CHANGE_LOG_MAX));
+    return { ok: true };
+  }
+
   status() {
     const counters = {};
     for (const n of COUNTER_NAMES) counters[n] = this.s.get(`c:${n}`) || 0;
@@ -128,6 +190,7 @@ export class UserDOCore {
       filtered,
       deliveries: this.s.get('dlog') || [],
       last24h: this.#last24h(),
+      changes: this.s.get('clog') || [],
       last_nudge: this.s.get('last_nudge') ?? null,
       disconnected: this.s.get('disconnected') === true, connecting: (this.s.get('connecting_until') || 0) > this.now() };
   }

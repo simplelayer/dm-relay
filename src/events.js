@@ -4,6 +4,7 @@ import { destLabel, outcomeLabel } from './delivery-log.js';
 import { applyUserFilters, buildForwardPayload, checkEnvelope, filterMessageEvent } from './filter.js';
 import { resolveRecipients } from './fanout.js';
 import { isUserId } from './routes.js';
+import { wipeUser } from './wipe.js';
 import { verifySlackSignature } from './slack-verify.js';
 
 function textResponse(body, status) {
@@ -34,7 +35,7 @@ async function deliver(recipient, payload, deps, deadlineMs) {
     const forward = entry.dest_type === 'cursor' ? forwardCursor : forwardGrok;
     const result = await forward({
       entry,
-      forwardPayload: buildForwardPayload(payload, deps.now()),
+      forwardPayload: buildForwardPayload(payload, deps.now(), entry),
       recipientId: userId,
       fetchImpl: deps.fetchImpl,
       now: deps.now,
@@ -55,13 +56,11 @@ async function handleRevocation(event, deps) {
     const ids = Array.isArray(event.tokens && event.tokens.oauth) ? event.tokens.oauth : [];
     for (const id of ids) {
       if (!isUserId(id)) continue;
-      await deps.routing.delete(id);
-      await deps.userDo(id).wipe();
+      await wipeUser(deps, id);
     }
   } else if (event.type === 'app_uninstalled') {
     for (const id of await deps.routing.listIds()) {
-      await deps.routing.delete(id);
-      await deps.userDo(id).wipe();
+      await wipeUser(deps, id);
     }
   }
 }

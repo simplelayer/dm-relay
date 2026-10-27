@@ -1,12 +1,18 @@
-import { REQUIRED_SCOPES, SESSION_TTL_S, SLACK_API, SLACK_AUTHORIZE_URL, STATE_TTL_S } from './constants.js';
-import { destLabel, outcomeLabel } from './delivery-log.js';
-import { fireTest, isValidCursorToken, verifyClaude, verifyCursor, verifyGrok } from './destinations.js';
+import { DISCONNECT_SESSION_TTL_S, REQUIRED_SCOPES, SESSION_TTL_S, SLACK_API, SLACK_AUTHORIZE_URL, STATE_TTL_S } from './constants.js';
+import { API_KEY_LABEL_MAX } from './constants.js';
+import { effectiveCaps, effectiveTrusted, effectiveVoice, parseCapsForm, parseProfileForm } from './caps.js';
+import { hashKey, newKeyMaterial } from './apikeys.js';
+import { destLabel } from './delivery-log.js';
+import { isValidCursorToken, verifyClaude, verifyCursor, verifyGrok } from './destinations.js';
 import { effectiveFilters, parseFilterForm } from './filter.js';
+import { promptsFor } from './prompts.js';
+import { describeDestination as describe, runTestFire, saveSettings, summaryFrom } from './settings.js';
 import {
   connectPage,
   destinationFormPage,
   disconnectConfirmPage,
   disconnectedPage,
+  keyCreatedPage,
   messagePage,
   statusPage,
   successPage
@@ -14,6 +20,7 @@ import {
 import { isValidSecret } from './standard-webhooks.js';
 import { validateDestinationUrl } from './ssrf.js';
 import { b64urlEncode, hmacSha256, parseCookies, randomBase64Url, timingSafeEqualStr, utf8 } from './util.js';
+import { wipeUser } from './wipe.js';
 
 const STATE_COOKIE_PREFIX = 'dmr_st_';
 const SESSION_COOKIE = 'dmr_sess';
@@ -23,20 +30,22 @@ const ATTRS = 'HttpOnly; Secure; SameSite=Lax';
 
 const DEST_NAMES = { grok: 'Grok automation webhook', cursor: 'Cursor automation webhook', claude_routine: 'Claude routine' };
 
-function describeDestination(route) {
-  if (!route) return null;
-  let host = '';
-  try {
-    host = new URL(route.url).hostname;
-  } catch {
-    host = '';
-  }
-  return { type: destLabel(route.dest_type), label: DEST_NAMES[route.dest_type] || 'Destination', host };
-}
+const describeDestination = (route) => describe(route, DEST_NAMES);
 
 async function manageFor(userId, deps, extra = {}) {
   const route = await deps.routing.get(userId);
-  return { destination: describeDestination(route), filters: effectiveFilters(route && route.filters), ...extra };
+  const keys = route ? (await deps.userDo(userId).listKeys()).keys : [];
+  return {
+    destination: describeDestination(route),
+    filters: effectiveFilters(route && route.filters),
+    caps: effectiveCaps(route && route.caps),
+    trusted_users: effectiveTrusted(route && route.trusted_users),
+    voice: effectiveVoice(route && route.voice),
+    keys,
+    specUrl: `${deps.config.baseUrl}/api/v1/spec`,
+    prompts: promptsFor(route),
+    ...extra
+  };
 }
 
 async function mac(deps, message) {
@@ -109,10 +118,14 @@ async function revokeToken(token, deps) {
   }
 }
 
+// A disconnect session holds a Slack token, so it stays short. Connect sessions hold none.
+const sessionTtlS = (intent) => (intent === 'connect' ? SESSION_TTL_S : DISCONNECT_SESSION_TTL_S);
+
 async function mintSession(record, deps) {
   const sid = randomBase64Url(32);
-  await deps.kv.put(`sess:${sid}`, JSON.stringify({ ...record, created: deps.now() }), { expirationTtl: SESSION_TTL_S });
-  return { sid, cookie: `${SESSION_COOKIE}=${sid}; ${ATTRS}; Path=/; Max-Age=${SESSION_TTL_S}` };
+  const ttl = sessionTtlS(record.intent);
+  await deps.kv.put(`sess:${sid}`, JSON.stringify({ ...record, created: deps.now() }), { expirationTtl: ttl });
+  return { sid, cookie: `${SESSION_COOKIE}=${sid}; ${ATTRS}; Path=/; Max-Age=${ttl}` };
 }
 
 async function getSession(request, deps) {
@@ -122,7 +135,7 @@ async function getSession(request, deps) {
   if (!raw) return null;
   try {
     const rec = JSON.parse(raw);
-    if (deps.now() - rec.created > SESSION_TTL_S * 1000) return null;
+    if (deps.now() - rec.created > sessionTtlS(rec.intent) * 1000) return null;
     return { sid, rec };
   } catch {
     return null;
@@ -160,19 +173,11 @@ export async function handleCallback(request, deps) {
     const st = await deps.userDo(userId).status();
     const route = await deps.routing.get(userId);
     if (!st.connecting && !route) await revokeToken(token, deps);
-    const dest = describeDestination(route);
     const res = statusPage({
       counters: st.counters,
       lastNudge: st.last_nudge,
       showNudge: route?.dest_type === 'claude_routine',
-      summary: {
-        connected: Boolean(route) && !st.disconnected,
-        destinations: dest ? [dest] : [],
-        lastDelivery: st.deliveries.find((d) => !d.test) || null,
-        last24h: st.last24h,
-        filtered: st.filtered,
-        deliveries: st.deliveries
-      }
+      summary: summaryFrom(st, route, DEST_NAMES)
     });
     res.headers.append('set-cookie', clear);
     return res;
@@ -221,7 +226,7 @@ export async function handleDestination(request, deps) {
   }
   const destType = form.get('dest_type');
   if (destType !== 'grok' && destType !== 'claude_routine' && destType !== 'cursor') return await retry('Choose a destination type.');
-  if (form.get('attest') !== '1' || form.get('no_send') !== '1') return await retry('Both confirmations are required.');
+  if (form.get('attest') !== '1') return await retry('The training attestation is required.');
   const secret = (form.get('secret') || '').trim();
   const v = validateDestinationUrl((form.get('url') || '').trim(), { type: destType, ...deps.validateOpts });
   if (!v.ok) return await retry('That URL is not allowed.');
@@ -236,7 +241,7 @@ export async function handleDestination(request, deps) {
     secret_or_bearer: secret,
     mode: destType === 'claude_routine' ? 'nudge' : 'full'
   };
-  if (previous && previous.filters) entry.filters = previous.filters;
+  for (const k of ['filters', 'caps', 'trusted_users', 'voice']) if (previous && previous[k] !== undefined) entry[k] = previous[k];
   const verifiers = {
     grok: () => verifyGrok({ entry, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts }),
     cursor: () => verifyCursor({ entry, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts }),
@@ -262,8 +267,7 @@ export async function handleDisconnectConfirm(request, deps) {
   }
   const userId = session.rec.uid;
   const revoked = await revokeToken(session.rec.token, deps);
-  await deps.userDo(userId).wipe();
-  await deps.routing.delete(userId);
+  await wipeUser(deps, userId);
   await deps.kv.delete(`sess:${session.sid}`);
   const res = disconnectedPage({ revoked });
   res.headers.append('set-cookie', clearSession);
@@ -279,17 +283,11 @@ export async function handleTestFire(request, deps) {
   const csrf = await csrfFor(deps, session.sid);
   const page = async (extra, error) => destinationFormPage({ csrf, error, manage: await manageFor(userId, deps, extra) });
 
-  if (!(await deps.userDo(userId).consumeLimit({ name: 'test' })).allowed) {
-    return messagePage('Too many tests', 'Too many tests. Please wait a minute and try again.', 429);
-  }
-  const route = await deps.routing.get(userId);
-  if (!route) return page({}, 'Save a destination first.');
-  const result = await fireTest({ entry: route, userId, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts });
-  const outcome = outcomeLabel(result);
-  await deps.userDo(userId).recordDelivery({ dest: destLabel(route.dest_type), outcome, test: true });
-  const ok = result.kind === 'ok';
-  const text = ok ? `HTTP ${result.status}` : `${outcome}${result.status ? ` (HTTP ${result.status})` : ''}`;
-  return page({ testResult: { ok, text } });
+  const r = await runTestFire(deps, userId);
+  if (r.limited) return messagePage('Too many tests', 'Too many tests. Please wait a minute and try again.', 429);
+  if (r.noRoute) return page({}, 'Save a destination first.');
+  const text = r.ok ? `HTTP ${r.status}` : `${r.outcome}${r.status ? ` (HTTP ${r.status})` : ''}`;
+  return page({ testResult: { ok: r.ok, text } });
 }
 
 export async function handleFilters(request, deps) {
@@ -307,6 +305,82 @@ export async function handleFilters(request, deps) {
   if (!route) return destinationFormPage({ csrf, error: 'Save a destination before setting filters.', manage: await manageFor(userId, deps) });
   const parsed = parseFilterForm(form);
   if (parsed.error) return destinationFormPage({ csrf, error: parsed.error, manage: await manageFor(userId, deps) });
-  await deps.routing.put(userId, { ...route, filters: parsed.filters });
+  await saveSettings(deps, userId, route, { filters: parsed.filters }, 'browser');
   return destinationFormPage({ csrf, manage: await manageFor(userId, deps, { filterMsg: { text: 'Filters saved.' } }) });
+}
+
+async function settingsAction(request, deps, { limit, forbidden, noRoute, apply }) {
+  const read = await readForm(request, deps);
+  if (read.error) return read.error;
+  const { session, form } = read;
+  if (session.rec.intent !== 'connect') return messagePage('Forbidden', forbidden, 403);
+  const userId = session.rec.uid;
+  const csrf = await csrfFor(deps, session.sid);
+  const page = async (error, extra) => destinationFormPage({ csrf, error, manage: await manageFor(userId, deps, extra) });
+  if (!(await deps.userDo(userId).consumeLimit({ name: limit })).allowed) {
+    return messagePage('Too many changes', 'Too many changes. Please wait a minute and try again.', 429);
+  }
+  const route = await deps.routing.get(userId);
+  if (!route) return page(noRoute);
+  return apply({ form, route, userId, page });
+}
+
+export function handleCaps(request, deps) {
+  return settingsAction(request, deps, {
+    limit: 'caps',
+    forbidden: 'This session cannot change capabilities.',
+    noRoute: 'Save a destination before setting capabilities.',
+    async apply({ form, route, userId, page }) {
+      const parsed = parseCapsForm(form, route.caps);
+      if (parsed.error) return page(parsed.error);
+      await saveSettings(deps, userId, route, { caps: parsed.caps }, 'browser');
+      return page(undefined, { capsMsg: { text: 'Capabilities saved.' } });
+    }
+  });
+}
+
+export function handleProfile(request, deps) {
+  return settingsAction(request, deps, {
+    limit: 'profile',
+    forbidden: 'This session cannot change trusted senders or voice.',
+    noRoute: 'Save a destination before setting trusted senders or voice.',
+    async apply({ form, route, userId, page }) {
+      const parsed = parseProfileForm(form);
+      if (parsed.error) return page(parsed.error);
+      await saveSettings(deps, userId, route, { trusted_users: parsed.trusted_users, voice: parsed.voice }, 'browser');
+      return page(undefined, { profileMsg: { text: 'Trusted senders and voice saved.' } });
+    }
+  });
+}
+
+export function handleKeyCreate(request, deps) {
+  return settingsAction(request, deps, {
+    limit: 'keys',
+    forbidden: 'This session cannot manage assistant keys.',
+    noRoute: 'Save a destination before creating an assistant key.',
+    async apply({ form, userId, page }) {
+      const label = String(form.get('label') || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
+      if ([...label].length > API_KEY_LABEL_MAX) return page(`The label can be at most ${API_KEY_LABEL_MAX} characters.`);
+      const { key, kid } = newKeyMaterial();
+      const hash = await hashKey(key);
+      const added = await deps.userDo(userId).addKey({ kid, hash, label });
+      if (!added.ok) return page('You already have the maximum number of active keys. Revoke one first.');
+      await deps.kv.put(`apikey:${hash}`, JSON.stringify({ uid: userId, kid, created: deps.now(), label }));
+      return keyCreatedPage({ key, specUrl: `${deps.config.baseUrl}/api/v1/spec` });
+    }
+  });
+}
+
+export function handleKeyRevoke(request, deps) {
+  return settingsAction(request, deps, {
+    limit: 'keys',
+    forbidden: 'This session cannot manage assistant keys.',
+    noRoute: 'Save a destination first.',
+    async apply({ form, userId, page }) {
+      const res = await deps.userDo(userId).revokeKey({ kid: String(form.get('kid') || '') });
+      if (!res.ok) return page('That key was not found.');
+      await deps.kv.delete(`apikey:${res.hash}`);
+      return page(undefined, { keysMsg: { text: 'Key revoked.' } });
+    }
+  });
 }

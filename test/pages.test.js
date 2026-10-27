@@ -46,11 +46,13 @@ test('/connect disclosures are all present', async () => {
     /type="checkbox" name="attest_preview"/,
     /model training on inputs is turned off/,
     /Attach only the Slack connector/,
-    /Disable every Slack write tool/,
+    /disable every Slack write tool/,
     /fire <code>text<\/code> must be ignored/,
     /prompt injection/,
     /inject arbitrary instructions/,
-    /no autonomous send/,
+    /controlled by your own automation permissions/,
+    /hostile message/,
+    /Do not put secrets in the voice text/,
     /receives the text and forwards none of it/,
     /not a technical guarantee/,
     /about 60 seconds/,
@@ -72,11 +74,12 @@ test('no external assets are referenced (only the Slack authorize link and the r
   }
 });
 
-test('destination form requires both confirmations and posts to itself', () => {
+test('destination form requires only the training attestation and posts to itself', () => {
   return pages.form().text().then((html) => {
     assert.match(html, /<form method="post" action="\/destination">/);
     assert.match(html, /name="attest"[^>]*required/);
-    assert.match(html, /name="no_send"[^>]*required/);
+    assert.equal(html.includes('no_send'), false);
+    assert.equal(/no autonomous send/i.test(html), false);
     assert.match(html, /autocomplete="off"/);
   });
 });

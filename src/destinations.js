@@ -9,6 +9,7 @@ import {
   NUDGE_TEXT_TEMPLATE,
   VERIFY_TEXT
 } from './constants.js';
+import { effectiveCaps } from './caps.js';
 import { buildHeaders, randomMessageId } from './standard-webhooks.js';
 import { validateDestinationUrl } from './ssrf.js';
 import { isTimeoutError, randomBase64Url, utf8 } from './util.js';
@@ -184,6 +185,8 @@ export async function fireTest({ entry, userId, fetchImpl, now, validateOpts }) 
     text: VERIFY_TEXT,
     ts: `${Math.floor(nowMs / 1000)}.000000`,
     thread_ts: null,
+    mode: effectiveCaps(entry.caps),
+    sender_trusted: false,
     relay_test: true
   };
   const bodyBytes = utf8(JSON.stringify(forwardPayload));

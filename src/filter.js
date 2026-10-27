@@ -1,4 +1,5 @@
 import { FILTER_KEYWORD_MAX_LENGTH, FILTER_MAX_KEYWORDS, FILTER_MAX_USERS } from './constants.js';
+import { effectiveCaps, effectiveTrusted, normalizeIds, splitIds } from './caps.js';
 import { isUserId } from './routes.js';
 
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
@@ -28,7 +29,7 @@ export function filterMessageEvent(payload, { allowBots = false } = {}) {
   return { forward: true, reason: 'ok' };
 }
 
-export function buildForwardPayload(payload, nowMs) {
+export function buildForwardPayload(payload, nowMs, entry = {}) {
   const ev = payload.event;
   return {
     event_id: payload.event_id,
@@ -38,7 +39,9 @@ export function buildForwardPayload(payload, nowMs) {
     sender_id: ev.user,
     text: typeof ev.text === 'string' ? ev.text : '',
     ts: ev.ts,
-    thread_ts: typeof ev.thread_ts === 'string' ? ev.thread_ts : null
+    thread_ts: typeof ev.thread_ts === 'string' ? ev.thread_ts : null,
+    mode: effectiveCaps(entry.caps),
+    sender_trusted: effectiveTrusted(entry.trusted_users).includes(ev.user)
   };
 }
 
@@ -62,19 +65,14 @@ export function applyUserFilters(ev, rawFilters) {
   return { forward: true, reason: 'ok' };
 }
 
-export function parseFilterForm(form) {
-  const users = [];
-  for (const part of String(form.get('skip_users') || '').split(/[\s,;]+/)) {
-    if (part === '') continue;
-    const id = part.toUpperCase();
-    if (!isUserId(id)) return { error: 'Slack user IDs look like U01ABCDEF2 (letters and digits, starting with U or W).' };
-    if (!users.includes(id)) users.push(id);
-  }
-  if (users.length > FILTER_MAX_USERS) return { error: `At most ${FILTER_MAX_USERS} user IDs.` };
+export function validateFilters({ skip_bots, skip_users, keywords: rawKeywords }) {
+  const u = normalizeIds(skip_users, FILTER_MAX_USERS);
+  if (u.error) return { error: u.error };
 
   const keywords = [];
   const seen = new Set();
-  for (const line of String(form.get('keywords') || '').split(/\r?\n/)) {
+  for (const line of rawKeywords) {
+    if (typeof line !== 'string') return { error: 'Keywords must be text.' };
     const k = line.replace(CONTROL_CHARS, '').trim();
     if (k === '') continue;
     if ([...k].length > FILTER_KEYWORD_MAX_LENGTH) return { error: `Each keyword can be at most ${FILTER_KEYWORD_MAX_LENGTH} characters.` };
@@ -85,5 +83,13 @@ export function parseFilterForm(form) {
   }
   if (keywords.length > FILTER_MAX_KEYWORDS) return { error: `At most ${FILTER_MAX_KEYWORDS} keywords.` };
 
-  return { filters: { skip_bots: form.get('skip_bots') === '1', skip_users: users, keywords } };
+  return { filters: { skip_bots: skip_bots === true, skip_users: u.ids, keywords } };
+}
+
+export function parseFilterForm(form) {
+  return validateFilters({
+    skip_bots: form.get('skip_bots') === '1',
+    skip_users: splitIds(form.get('skip_users')),
+    keywords: String(form.get('keywords') || '').split(/\r?\n/)
+  });
 }

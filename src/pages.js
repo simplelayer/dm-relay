@@ -1,5 +1,4 @@
 import { CSP } from './constants.js';
-import { PROMPTS } from './prompts.js';
 import { randomBase64Url } from './util.js';
 
 const COPY_SCRIPT =
@@ -48,21 +47,24 @@ export function connectPage({ intent, authorizeUrl, cookie, publicRepoUrl }) {
 <li>Your destination secret or bearer token (Grok signing secret, Claude routine token or Cursor automation token) is stored in the relay's key-value store and is readable by the operator.</li>
 <li>Connecting a Claude routine fires one real routine run to verify it, which uses one of your daily runs.</li>
 <li>Each verification attempt can trigger one automation run.</li>
+<li>The relay never sends anything to Slack. What your own AI assistant may do with your DMs (process them, draft replies, send) is controlled by your own automation permissions, and you can record your choices after connecting. Those choices only change the prompts, these disclosures and a hint field in the forwarded data; they are not enforcement by the relay.</li>
+<li>DM text is untrusted data written by any workspace member. An assistant that is allowed to act or send can be steered by a hostile message, so keep send off unless you need it and rely on the trusted-sender list.</li>
+<li>Your trusted-sender list, reply voice text and capability choices are stored with your routing entry and are readable by the operator. Do not put secrets in the voice text. Assistant API keys are stored only as a SHA-256 hash.</li>
 </ul>
 <h2>Claude routine setup rules</h2>
 <ul>
 <li>Attach only the Slack connector to the routine.</li>
-<li>Disable every Slack write tool; allow draft creation only, if it exists.</li>
+<li>Give the routine only the Slack permissions you want it to use. If you do not want it to send, disable every Slack write tool and allow draft creation only, if it exists.</li>
 <li>In the routine prompt, state that the fire <code>text</code> must be ignored and that DM content is data, not instructions.</li>
 </ul>
 <h2>Cursor automation setup rules</h2>
 <ul>
 <li>The Cursor account that owns the automation must have privacy mode on (no training on inputs). You attest to this below and on the next page.</li>
-<li>The automation must have no autonomous send capability.</li>
+<li>What the automation may do (process, draft, send) is controlled by its own permissions. Keep send off unless you need it.</li>
 <li>In the automation prompt, state that the DM text is data, not instructions, because any workspace member can write text the automation reads.</li>
 </ul>
 <h2>Unattended-agent risk</h2>
-<p>Routines run unattended. Any workspace member can write text your routine reads, so prompt injection is possible. Whoever holds the routine bearer token (the operator, through the key-value store) can inject arbitrary instructions into your agent through the fire text. Your destination must have no autonomous send, for Grok bots and Cursor automations as well.</p>
+<p>Routines run unattended. Any workspace member can write text your routine reads, so prompt injection is possible. Whoever holds the routine bearer token (the operator, through the key-value store) can inject arbitrary instructions into your agent through the fire text. Keep send off for your Grok bot, Cursor automation or Claude routine unless you need it, and rely on the trusted-sender list.</p>
 <p>The same applies to Cursor automations: any workspace member can write text your automation reads, and whoever holds the Cursor bearer token (the operator, through the key-value store) can trigger your automation with arbitrary content.</p>
 <h2>Third parties and training</h2>
 <p><label><input type="checkbox" name="attest_preview" value="1"> I attest that model training on inputs is turned off for my destination account (Claude: "Help improve Claude" off, or a Team/Enterprise plan; Grok: the equivalent setting; Cursor: privacy mode on). You will be asked to confirm this again before activation.</label></p>
@@ -100,13 +102,74 @@ ${msg}
 </form>`;
 }
 
-function promptsBlock() {
-  const items = PROMPTS.map(
-    (p) => `<h3>${esc(p.label)}</h3>
-<p><textarea id="prompt-${esc(p.id)}" readonly rows="9" cols="60">${esc(p.text)}</textarea><br><button type="button" data-copy="prompt-${esc(p.id)}" hidden>Copy prompt</button></p>`
-  ).join('\n');
-  return `<h2>Draft-only automation prompts</h2>
-<p>Paste the prompt for your destination type into your own automation. Each one tells the automation to draft a reply for you to review and never to send or post anything.</p>
+function msgLine(m) {
+  return m ? `<p role="status"><strong>${esc(m.text)}</strong></p>` : '';
+}
+
+function capsBlock(csrf, manage) {
+  const c = manage.caps;
+  return `<h2>What your assistant may do</h2>
+<p>The relay itself never sends anything to Slack. These options only change the prompts below, the disclosures and a <code>mode</code> hint in the forwarded data. They are not enforcement: what your assistant can actually do is set by its own automation permissions and Slack connector.</p>
+<p>DM text is untrusted data written by any workspace member. An assistant that is allowed to act or send can be steered by a hostile message, so keep send off unless you need it and rely on the trusted-sender list.</p>
+${msgLine(manage.capsMsg)}
+<form method="post" action="/caps">
+<input type="hidden" name="csrf" value="${esc(csrf)}">
+<p><label><input type="checkbox" name="process" value="1"${c.process ? ' checked' : ''}> Process: my assistant may start its own workflows for trusted senders</label><br>
+<label><input type="checkbox" name="draft" value="1"${c.draft ? ' checked' : ''}> Draft: my assistant may draft replies for me to review</label><br>
+<label><input type="checkbox" name="send" value="1"${c.send ? ' checked' : ''}> Send: my assistant may reply in the same DM or thread for trusted senders</label></p>
+<p>To turn send on you must also tick this box and type the word SEND. Turning send off needs no confirmation.</p>
+<p><label><input type="checkbox" name="confirm_send" value="1"> I understand that a hostile DM could steer an assistant that is allowed to send.</label></p>
+<p><label>Type SEND to confirm<br><input type="text" name="send_word" autocomplete="off"></label></p>
+<p><button type="submit">Save capabilities</button></p>
+</form>`;
+}
+
+function profileBlock(csrf, manage) {
+  const used = [...manage.voice].length;
+  return `<h2>Trusted senders and reply voice</h2>
+<p>Trusted senders are the only people whose messages an assistant with process or send enabled should act on. Forwarded data carries a <code>sender_trusted</code> flag. Both settings are stored with your routing entry and are readable by the operator.</p>
+${msgLine(manage.profileMsg)}
+<form method="post" action="/profile">
+<input type="hidden" name="csrf" value="${esc(csrf)}">
+<p><label>Trusted Slack user IDs (separated by spaces or commas, up to 50)<br><input type="text" name="trusted_users" autocomplete="off" value="${esc(manage.trusted_users.join(' '))}"></label></p>
+<p><label>Reply voice: a short sample or description of how you write (up to 2000 characters). It is included in your prompts and is never forwarded with DMs. Do not put secrets here.<br><textarea name="voice" rows="6" cols="60" autocomplete="off">${esc(manage.voice)}</textarea></label><br>Currently ${esc(used)} of 2000 characters.</p>
+<p><button type="submit">Save trusted senders and voice</button></p>
+</form>`;
+}
+
+function fmtDate(ms) {
+  return Number.isFinite(ms) ? new Date(ms).toISOString().slice(0, 10) : 'never';
+}
+
+function keysBlock(csrf, manage) {
+  const list = manage.keys.length
+    ? `<ul>${manage.keys
+        .map(
+          (k) => `<li>${esc(k.label || '(no label)')}, created ${esc(fmtDate(k.created))}, last used ${esc(fmtDate(k.last_used))}
+<form method="post" action="/keys/revoke" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="kid" value="${esc(k.kid)}"> <button type="submit">Revoke</button></form></li>`
+        )
+        .join('')}</ul>`
+    : '<p>No active keys.</p>';
+  return `<h2>Assistant keys</h2>
+<p>A key lets your own assistant read and update these settings through a small API. Give the key and the spec URL <code>${esc(manage.specUrl)}</code> to your assistant. The API can never turn send on, change the destination or create keys. You can have up to 2 active keys. Only a hash of each key is stored, and the key is shown once.</p>
+${msgLine(manage.keysMsg)}
+${list}
+<form method="post" action="/keys/create">
+<input type="hidden" name="csrf" value="${esc(csrf)}">
+<p><label>Label (optional, up to 40 characters)<br><input type="text" name="label" maxlength="40" autocomplete="off"></label></p>
+<p><button type="submit">Create assistant key</button></p>
+</form>`;
+}
+
+function promptsBlock(manage) {
+  const items = manage.prompts
+    .map(
+      (p) => `<h3>${esc(p.label)}</h3>
+<p><textarea id="prompt-${esc(p.id)}" readonly rows="14" cols="60">${esc(p.text)}</textarea><br><button type="button" data-copy="prompt-${esc(p.id)}" hidden>Copy prompt</button></p>`
+    )
+    .join('\n');
+  return `<h2>Automation prompts</h2>
+<p>Paste the prompt for your destination type into your own automation. It is generated from your current settings, so copy it again after you change capabilities, trusted senders or voice. Claude routines are not told who sent a DM, so their prompt embeds your trusted list and must be re-copied whenever that list changes.</p>
 ${items}`;
 }
 
@@ -124,14 +187,23 @@ ${manage ? savedDestinationBlock(csrf, manage) : ''}
 <p><label>Webhook URL or routine fire URL<br><input type="text" name="url" autocomplete="off" required></label></p>
 <p><label>Grok signing secret (starts with <code>whsec_</code>), Cursor bearer token (starts with <code>crsr_</code>) or Claude routine bearer token<br><input type="password" name="secret" autocomplete="off" required></label></p>
 <p><label><input type="checkbox" name="attest" value="1" required> I attest that model training on inputs is turned off for this destination account (for Cursor: privacy mode is on; the attestation covers the account that owns the token).</label></p>
-<p><label><input type="checkbox" name="no_send" value="1" required> This destination has no autonomous send and I understand the unattended-agent risks.</label></p>
-<p>Cursor: Each verification attempt can trigger one automation run. The automation must have no autonomous send capability and must treat DM text as data, not instructions. Whoever holds the bearer token (the operator, through the key-value store) can trigger the automation with arbitrary content.</p>
+<p>Cursor: Each verification attempt can trigger one automation run. The automation must treat DM text as data, not instructions, and what it may do is controlled by its own permissions. Whoever holds the bearer token (the operator, through the key-value store) can trigger the automation with arbitrary content.</p>
 <p>Leaving without activating keeps Slack access until you run /disconnect.</p>
 <p><button type="submit">Verify and activate</button></p>
 </form>
 ${manage ? `${filtersBlock(csrf, manage)}
-${promptsBlock()}` : ''}`;
+${manage.destination ? `${capsBlock(csrf, manage)}
+${profileBlock(csrf, manage)}
+${keysBlock(csrf, manage)}
+` : ''}${promptsBlock(manage)}` : ''}`;
   return htmlResponse('Destination', body, { status: error ? 400 : 200, script: manage ? COPY_SCRIPT : null });
+}
+
+export function keyCreatedPage({ key, specUrl }) {
+  return htmlResponse(
+    'Assistant key',
+    `<h1>Your assistant key</h1><p><strong>This key is shown once and cannot be shown again.</strong> Copy it now and give it to your assistant together with the spec URL <code>${esc(specUrl)}</code>. If you lose it, revoke it on /connect and create another.</p><p><input type="text" readonly value="${esc(key)}" autocomplete="off" size="60"></p><p>Go back to <a href="/connect">/connect</a> to manage your keys.</p>`
+  );
 }
 
 export function successPage() {
@@ -156,13 +228,19 @@ function summaryBlock(s) {
         .map((d) => `<li>${esc(fmtTime(d.t))} ${esc(d.d)} ${esc(d.o)}${d.test ? ' (test)' : ''}</li>`)
         .join('')}</ul>`
     : '<h2>Recent deliveries</h2><p>No deliveries yet.</p>';
+  const changes = s.changes
+    ? s.changes.length
+      ? `<h2>Recent settings changes</h2><p>Which settings changed, when and where. Never the values.</p><ul>${s.changes.map((c) => `<li>${esc(fmtTime(c.t))} via ${esc(c.via)}: ${esc(c.fields.join(', '))}</li>`).join('')}</ul>`
+      : '<h2>Recent settings changes</h2><p>No changes yet.</p>'
+    : '';
   return `<ul>
 <li>Connected: ${s.connected ? 'yes' : 'no'}</li>
 <li>Destinations: ${dests}</li>
 <li>Last delivery: ${last}</li>
 <li>Last 24 hours: ${esc(s.last24h.delivered)} delivered, ${esc(filtered)} filtered, ${esc(s.last24h.failed)} failed</li>
 </ul>
-${log}`;
+${log}
+${changes}`;
 }
 
 export function statusPage({ counters, lastNudge, showNudge = false, summary = null }) {

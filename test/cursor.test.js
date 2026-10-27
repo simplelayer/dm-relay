@@ -295,12 +295,12 @@ test('POST /destination: cursor rejects a bad token shape without any outbound c
   assert.equal(l.csrf.length > 0, true);
 });
 
-test('POST /destination: attestation and no-send boxes are enforced server-side for cursor', async () => {
+test('POST /destination: the attestation is enforced server-side for cursor and the old no_send box is no longer required', async () => {
   const w = world();
   const l = await login(w);
   assert.equal((await post(w, l, { attest: '' })).status, 400);
-  assert.equal((await post(w, l, { no_send: '' })).status, 400);
   assert.equal(w.fetchImpl.calls.filter((c) => c.url === CURSOR_URL).length, 0);
+  assert.equal((await post(w, l, { no_send: '' })).status, 200);
 });
 
 test('POST /destination: failed or redirecting cursor verification is not stored and does not leak the token', async () => {
@@ -326,7 +326,7 @@ test('POST /destination: cursor registration shares the per-user rate limit', as
 test('the connect page and destination form disclose the cursor requirements', async () => {
   const w = world();
   const html = (await (await w.request('/connect')).text()).replace(/&quot;/g, '"');
-  for (const re of [/sent to Cursor/, /privacy mode on/, /no autonomous send capability/, /data, not instructions/, /Each verification attempt can trigger one automation run\./, /no retry after a timeout or a 5xx other than 503/, /trigger your automation with arbitrary content/]) {
+  for (const re of [/sent to Cursor/, /privacy mode on/, /controlled by its own permissions/, /data, not instructions/, /Each verification attempt can trigger one automation run\./, /no retry after a timeout or a 5xx other than 503/, /trigger your automation with arbitrary content/]) {
     assert.match(html, re);
   }
   const l = await login(w);
@@ -356,7 +356,9 @@ test('e2e: a DM to a user with a cursor route is forwarded with the bearer heade
   assert.equal(init.headers['webhook-signature'], undefined);
   assert.equal(init.headers['webhook-id'], undefined);
   const body = decode(init.body);
-  assert.deepEqual(Object.keys(body), ['event_id', 'received_at', 'type', 'channel_id', 'sender_id', 'text', 'ts', 'thread_ts']);
+  assert.deepEqual(Object.keys(body), ['event_id', 'received_at', 'type', 'channel_id', 'sender_id', 'text', 'ts', 'thread_ts', 'mode', 'sender_trusted']);
+  assert.deepEqual(body.mode, { process: true, draft: true, send: false });
+  assert.equal(body.sender_trusted, false);
   assert.equal(body.event_id, 'Ev0001');
   assert.equal(body.type, 'dm');
   assert.equal(body.channel_id, 'D0CHAN1');

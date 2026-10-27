@@ -55,7 +55,7 @@ test('missing event is dropped', () => {
 test('forward payload has exactly the specified fields and never previous_message', () => {
   const p = msgPayload({ sender: U1, channel: 'G0GROUP', channelType: 'mpim', extraEvent: { previous_message: { text: 'leak' } } });
   const out = buildForwardPayload(p, Date.UTC(2026, 9, 1));
-  assert.deepEqual(Object.keys(out).sort(), ['channel_id', 'event_id', 'received_at', 'sender_id', 'text', 'thread_ts', 'ts', 'type']);
+  assert.deepEqual(Object.keys(out).sort(), ['channel_id', 'event_id', 'mode', 'received_at', 'sender_id', 'sender_trusted', 'text', 'thread_ts', 'ts', 'type']);
   assert.equal(out.type, 'group_dm');
   assert.equal(out.received_at, '2026-10-01T00:00:00.000Z');
   assert.equal(JSON.stringify(out).includes('leak'), false);
