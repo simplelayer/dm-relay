@@ -53,8 +53,7 @@ test('src has no runtime dependencies (only relative and cloudflare-free imports
   }
 });
 
-test('P6/P7 markers exist next to the unconfirmed constants', () => {
+test('P6 marker exists next to the unconfirmed constant (P7 confirmed live 2026-10-26)', () => {
   const c = readFileSync(join(ROOT, 'src/constants.js'), 'utf8');
   assert.match(c, /TODO\(P6\)[^\n]*\nexport const CLAUDE_ROUTINE_BETA_HEADER/);
-  assert.match(c, /TODO\(P7\)[^\n]*\nexport const GROK_HOST_PATTERN/);
 });

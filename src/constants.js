@@ -27,14 +27,14 @@ export const ANTHROPIC_VERSION = '2023-06-01';
 // TODO(P6): replace with the beta header value confirmed by firing a routine by hand.
 export const CLAUDE_ROUTINE_BETA_HEADER = 'experimental-cc-routine-2026-04-01';
 
-// TODO(P7): replace with the host pattern confirmed by POSTing a signed test to a Grok webhook.
+// P7 confirmed 2026-10-26: real Grok webhook endpoint is grok.com/webhook/automation/<id>; relay delivery accepted (2 runs succeeded).
 export const GROK_HOST_PATTERN = /^([a-z0-9-]+\.)*(x\.ai|grok\.com)$/;
 
-// TODO(P12): confirm host api2.cursor.sh and the crsr_ token character set by registering a real automation.
+// P12 confirmed 2026-10-26: api2.cursor.sh webhook registered and a live DM ran the automation.
 export const CURSOR_HOST = 'api2.cursor.sh';
 export const CURSOR_WEBHOOK_PATH =
   /^\/automations\/webhook\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-// TODO(P12): confirm host api2.cursor.sh and the crsr_ token character set by registering a real automation.
+// P12 confirmed 2026-10-26: api2.cursor.sh webhook registered and a live DM ran the automation.
 export const CURSOR_TOKEN_PATTERN =/^crsr_[A-Za-z0-9_-]+$/;
 export const CURSOR_TOKEN_MIN_LENGTH = 20;
 export const CURSOR_TOKEN_MAX_LENGTH = 200;

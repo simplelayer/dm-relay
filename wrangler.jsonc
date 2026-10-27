@@ -15,7 +15,7 @@
   "vars": {
     "SLACK_TEAM_ID": "TGVBK27C3",
     "SLACK_APP_ID": "A0CBLR1H9M5",
-    "BASE_URL": "https://dm-relay.kyle-ae1.workers.dev",
+    "BASE_URL": "https://dm.granitecity.io",
     "PUBLIC_REPO_URL": "https://github.com/simplelayer/dm-relay",
     "OPERATOR_HOSTS": ""
   }
