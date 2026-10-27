@@ -308,7 +308,7 @@ test('E: the reply voice is a fenced, labelled block and omitted when empty', ()
   assert.match(nasty, /\n`{5}\na ``` b\n````\nc\n`{5}$/);
 });
 
-test('E: /connect shows the saved type only (all three when none), generated from current settings', async () => {
+test('E: /connect shows the saved type prompt first and the other two folded in details, generated from current settings', async () => {
   const w = world();
   const none = await login(w);
   for (const id of ['cursor', 'grok', 'claude']) assert.match(none.html, new RegExp(`id="prompt-${id}"`));
@@ -318,7 +318,10 @@ test('E: /connect shows the saved type only (all three when none), generated fro
   await w.routing.put(U1, { ...e, trusted_users: [U2], voice: VOICE, caps: { process: true, draft: true, send: true } });
   const l = await login(w);
   assert.match(l.html, /id="prompt-claude"/);
-  assert.equal(/id="prompt-(cursor|grok)"/.test(l.html), false);
+  const detailsAt = l.html.indexOf('<details class="sub"><summary>Prompts for other destination types');
+  assert.ok(detailsAt > 0);
+  assert.ok(l.html.indexOf('id="prompt-claude"') < detailsAt);
+  assert.ok(l.html.indexOf('id="prompt-cursor"') > detailsAt && l.html.indexOf('id="prompt-grok"') > detailsAt);
   const text = l.html.match(/<textarea id="prompt-claude"[^>]*>([\s\S]*?)<\/textarea>/)[1];
   assert.ok(text.includes(U2) && text.includes('VOICEMARKER') && text.includes('only in the same DM or thread'));
   assert.deepEqual(promptsFor(await w.routing.get(U1)).map((p) => p.id), ['claude']);
@@ -426,7 +429,11 @@ test('F: spec needs no auth, is JSON, lists endpoints and what the API cannot do
     'PATCH /api/v1/settings',
     'GET /api/v1/prompt',
     'GET /api/v1/status',
-    'POST /api/v1/test'
+    'POST /api/v1/test',
+    'GET /api/v1/setup',
+    'POST /api/v1/requests',
+    'GET /api/v1/requests',
+    'DELETE /api/v1/requests/<id>'
   ]);
   assert.equal(spec.limits.request_body_max_bytes, API_BODY_MAX);
   assert.equal(spec.limits.requests_per_minute_per_key, 60);

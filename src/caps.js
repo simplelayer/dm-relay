@@ -51,9 +51,16 @@ export function parseCapsForm(form, current) {
 }
 
 export function parseProfileForm(form) {
-  const t = normalizeIds(splitIds(form.get('trusted_users')), TRUSTED_MAX);
-  if (t.error) return { error: t.error };
-  const v = cleanVoice(form.get('voice') || '');
-  if (v.error) return { error: v.error };
-  return { trusted_users: t.ids, voice: v.voice };
+  const out = {};
+  if (form.has('trusted_users') || !form.has('voice')) {
+    const t = normalizeIds(splitIds(form.get('trusted_users')), TRUSTED_MAX);
+    if (t.error) return { error: t.error };
+    out.trusted_users = t.ids;
+  }
+  if (form.has('voice') || !form.has('trusted_users')) {
+    const v = cleanVoice(form.get('voice') || '');
+    if (v.error) return { error: v.error };
+    out.voice = v.voice;
+  }
+  return out;
 }

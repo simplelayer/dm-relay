@@ -54,9 +54,30 @@ Requests use `Authorization: Bearer dmr_...`. There are no cookies and no CORS h
 | `GET /api/v1/prompt?type=cursor\|grok\|claude_routine` | key | The current generated prompt; `type` defaults to the saved type. |
 | `GET /api/v1/status` | key | The same data as the user's status page (summary, last 24 hour counts, delivery log, recent settings changes). No message content. |
 | `POST /api/v1/test` | key | The browser test-fire: same 3 per minute limit, recorded as a test. |
+| `GET /api/v1/setup` | key | `{steps:[{id,title,done,actor,how,url}], next_step}`: the setup checklist computed from real state (sign-in, destination, test, prompt, first delivery, optional voice and trusted senders). `actor` is `assistant` or `human`. The prompt step is never marked done because it cannot be detected. No secrets. |
+| `POST /api/v1/requests` | key | Propose a sensitive change (see Approval requests). Returns `{id, type, status:"pending", expires}`. |
+| `GET /api/v1/requests` | key | The user's requests: id, type, summary, status (`pending`, `approved`, `rejected`, `expired`, `cancelled`), created, expires. Never secrets. |
+| `DELETE /api/v1/requests/<id>` | key | Cancel one of the user's own pending requests. |
 
-Limits: request body at most 8 KB (413 otherwise), 60 requests per minute per key (429 with `Retry-After`), 2 active keys per user. The API cannot enable send, change the destination URL, secret or type, create or revoke keys, or disconnect. Unknown endpoints return 404 and wrong methods 405, with no CORS headers.
+Limits: request body at most 8 KB (413 otherwise), 60 requests per minute per key (429 with `Retry-After`), 2 active keys per user. The API cannot enable send, change the destination URL, secret or type directly, approve or apply a request, create or revoke keys, or disconnect. Unknown endpoints return 404 and wrong methods 405, with no CORS headers.
 
+
+## Approval requests (assistant proposes, human approves)
+
+The assistant cannot do the sensitive steps itself. It proposes them with `POST /api/v1/requests` and the user approves each one in the browser at `/connect`.
+
+- **Types.** `destination` (`dest_type` grok, cursor or claude_routine, `url`, `secret`), `enable_send` (no fields) and `add_trusted` (`user_ids`, 1 to 10 Slack user IDs). Unknown fields return 400.
+- **Validation at proposal.** The same URL validators as the browser form (https only, host allowlists, SSRF and own-host checks) and the same secret shape checks run when the request is made. The destination is not contacted until a human approves.
+- **Storage.** Requests live in the user's Durable Object (`reqs`), not in KV. The destination secret exists only inside the pending request. It is never returned by any API response or page, never logged and never written to the change log or delivery log. It is deleted from the store when the request is approved, rejected, cancelled or expires (24 hours). The operator can read it while the request is pending, like every other secret held for the user.
+- **Limits.** At most 5 pending requests per user (409 beyond), identical pending requests are deduplicated (200 with the existing id), 10 proposals per minute, 8 KB bodies. Ids are 16 random bytes in base64url.
+- **Approval.** `/connect` lists each pending request with the exact change (destination: type and host only; send: a strong warning; trusted: the IDs) and Approve and Reject buttons (`POST /requests/approve`, `POST /requests/reject`: same session, connect intent, CSRF token and origin checks as the other forms, 10 per minute). Approving applies exactly the stored request. A destination needs the training attestation, then runs the same verification as the form and stays pending if it fails. Send needs the `confirm_send` checkbox and the typed word `SEND`. Trusted additions merge under the 50 ID cap. Expired, resolved and other users' ids are refused. Caps, filters, trusted senders and voice survive a destination approval.
+- **Change log.** Each approval or rejection is recorded with `via: approval` and a field such as `request:destination` or `request:enable_send:rejected`, never values.
+- **Wipe.** Requests are removed with the rest of the Durable Object on disconnect, `tokens_revoked` and `app_uninstalled`.
+- **Bootstrap.** After Slack sign-in, "Set up with my assistant" on `/connect` (when the user has fewer than 2 keys, even before a destination exists) creates a key labelled `assistant` and shows it once together with the spec URL and the instructions "Fetch the spec URL, then call GET /api/v1/setup with this key and follow next_step. Never post or send anything unless the user has approved Send." That page keeps the strict no-script policy: the block is selectable with one click and has no copy button.
+
+## Pages
+
+Every page shares one small inline stylesheet (system fonts, one accent colour variable, light and dark, down to 360 px, no external assets). `/connect` is a set of cards: setup checklist (computed from real state), what the assistant can do (a banner such as "Your assistant can: process, draft. It cannot send." and a warning-styled Send control), connection (saved destination, test, and a destination form that shows only the hints for the chosen type using CSS `:has()` only), pending requests, assistant keys, filters and trusted senders, voice and prompts (the saved type's prompt first, the other two folded). `/status` adds a 24 hour delivery chart as inline SVG with a text summary and data table, a delivery table and a pending-requests banner. Error and expired-session pages say what happened and link to start again.
 
 ## Deploy script
 
@@ -64,7 +85,7 @@ Limits: request body at most 8 KB (413 otherwise), 60 requests per minute per ke
 
 ## Layout
 
-`src/index.js` routing and wiring; `slack-verify.js`, `filter.js`, `fanout.js`, `standard-webhooks.js`, `destinations.js`, `ssrf.js`, `oauth.js`, `pages.js`, `user-do.js`, `routes.js`, `events.js`, `util.js`, `constants.js`, `delivery-log.js`, `prompts.js`, `caps.js`, `settings.js`, `apikeys.js`, `api.js`, `wipe.js`. There are no runtime dependencies. Pure logic runs in plain Node.
+`src/index.js` routing and wiring; `slack-verify.js`, `filter.js`, `fanout.js`, `standard-webhooks.js`, `destinations.js`, `ssrf.js`, `oauth.js`, `pages.js`, `user-do.js`, `routes.js`, `events.js`, `util.js`, `constants.js`, `delivery-log.js`, `prompts.js`, `caps.js`, `settings.js`, `apikeys.js`, `api.js`, `requests.js`, `wipe.js`. There are no runtime dependencies. Pure logic runs in plain Node.
 
 ## Tests
 

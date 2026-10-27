@@ -1,11 +1,12 @@
 import { DISCONNECT_SESSION_TTL_S, REQUIRED_SCOPES, SESSION_TTL_S, SLACK_API, SLACK_AUTHORIZE_URL, STATE_TTL_S } from './constants.js';
-import { API_KEY_LABEL_MAX } from './constants.js';
-import { effectiveCaps, effectiveTrusted, effectiveVoice, parseCapsForm, parseProfileForm } from './caps.js';
+import { API_KEY_LABEL_MAX, TRUSTED_MAX } from './constants.js';
+import { effectiveCaps, effectiveTrusted, effectiveVoice, normalizeIds, parseCapsForm, parseProfileForm } from './caps.js';
 import { hashKey, newKeyMaterial } from './apikeys.js';
 import { destLabel } from './delivery-log.js';
-import { isValidCursorToken, verifyClaude, verifyCursor, verifyGrok } from './destinations.js';
+import { verifyClaude, verifyCursor, verifyGrok } from './destinations.js';
 import { effectiveFilters, parseFilterForm } from './filter.js';
-import { promptsFor } from './prompts.js';
+import { allPromptsFor } from './prompts.js';
+import { REQUEST_ID, checkDestinationInput } from './requests.js';
 import { describeDestination as describe, runTestFire, saveSettings, summaryFrom } from './settings.js';
 import {
   connectPage,
@@ -17,8 +18,6 @@ import {
   statusPage,
   successPage
 } from './pages.js';
-import { isValidSecret } from './standard-webhooks.js';
-import { validateDestinationUrl } from './ssrf.js';
 import { b64urlEncode, hmacSha256, parseCookies, randomBase64Url, timingSafeEqualStr, utf8 } from './util.js';
 import { wipeUser } from './wipe.js';
 
@@ -33,17 +32,28 @@ const DEST_NAMES = { grok: 'Grok automation webhook', cursor: 'Cursor automation
 const describeDestination = (route) => describe(route, DEST_NAMES);
 
 async function manageFor(userId, deps, extra = {}) {
-  const route = await deps.routing.get(userId);
-  const keys = route ? (await deps.userDo(userId).listKeys()).keys : [];
+  const [route, st, keys, requests] = await Promise.all([
+    deps.routing.get(userId),
+    deps.userDo(userId).status(),
+    deps.userDo(userId).listKeys(),
+    deps.userDo(userId).reqList()
+  ]);
+  const deliveries = st.deliveries || [];
   return {
     destination: describeDestination(route),
     filters: effectiveFilters(route && route.filters),
     caps: effectiveCaps(route && route.caps),
     trusted_users: effectiveTrusted(route && route.trusted_users),
     voice: effectiveVoice(route && route.voice),
-    keys,
+    keys: keys.keys,
     specUrl: `${deps.config.baseUrl}/api/v1/spec`,
-    prompts: promptsFor(route),
+    prompts: allPromptsFor(route),
+    requests: requests.requests,
+    progress: {
+      destination: Boolean(route),
+      testPassed: deliveries.some((d) => d.test === true && d.o === 'ok'),
+      delivered: deliveries.some((d) => !d.test && d.o === 'ok') || (st.counters && st.counters.forwarded > 0)
+    },
     ...extra
   };
 }
@@ -202,12 +212,12 @@ function originAllowed(request, deps) {
 }
 
 async function readForm(request, deps) {
-  if (!originAllowed(request, deps)) return { error: messagePage('Forbidden', 'Cross-origin request refused.', 403) };
+  if (!originAllowed(request, deps)) return { error: messagePage('Forbidden', 'This request did not come from this site, so it was refused. Please start again from /connect.', 403) };
   const session = await getSession(request, deps);
-  if (!session) return { error: messagePage('Session expired', 'Please start again from /connect.', 401) };
+  if (!session) return { error: messagePage('Session expired', 'Your session timed out or was not found. Sessions end after an hour for your security. Please start again from /connect.', 401) };
   const form = new URLSearchParams(await request.text());
   if (!timingSafeEqualStr(form.get('csrf') || '', await csrfFor(deps, session.sid))) {
-    return { error: messagePage('Forbidden', 'Invalid request token.', 403) };
+    return { error: messagePage('Forbidden', 'This page is out of date or was not opened from DM Relay, so the request was refused. Please start again from /connect.', 403) };
   }
   return { session, form };
 }
@@ -227,18 +237,14 @@ export async function handleDestination(request, deps) {
   const destType = form.get('dest_type');
   if (destType !== 'grok' && destType !== 'claude_routine' && destType !== 'cursor') return await retry('Choose a destination type.');
   if (form.get('attest') !== '1') return await retry('The training attestation is required.');
-  const secret = (form.get('secret') || '').trim();
-  const v = validateDestinationUrl((form.get('url') || '').trim(), { type: destType, ...deps.validateOpts });
-  if (!v.ok) return await retry('That URL is not allowed.');
-  if (destType === 'grok' && !isValidSecret(secret)) return await retry('The signing secret must start with whsec_ and be valid base64.');
-  if (destType === 'claude_routine' && secret === '') return await retry('A bearer token is required.');
-  if (destType === 'cursor' && !isValidCursorToken(secret)) return await retry('The bearer token must start with crsr_ and contain only letters, digits, hyphens and underscores (20 to 200 characters).');
+  const checked = checkDestinationInput({ destType, url: form.get('url'), secret: form.get('secret') }, deps.validateOpts);
+  if (checked.error) return await retry(checked.error);
 
   const previous = await deps.routing.get(userId);
   const entry = {
     dest_type: destType,
-    url: v.url.href,
-    secret_or_bearer: secret,
+    url: checked.url,
+    secret_or_bearer: checked.secret,
     mode: destType === 'claude_routine' ? 'nudge' : 'full'
   };
   for (const k of ['filters', 'caps', 'trusted_users', 'voice']) if (previous && previous[k] !== undefined) entry[k] = previous[k];
@@ -348,9 +354,35 @@ export function handleProfile(request, deps) {
       const parsed = parseProfileForm(form);
       if (parsed.error) return page(parsed.error);
       await saveSettings(deps, userId, route, { trusted_users: parsed.trusted_users, voice: parsed.voice }, 'browser');
-      return page(undefined, { profileMsg: { text: 'Trusted senders and voice saved.' } });
+      return page(undefined, form.has('trusted_users') ? { trustedMsg: { text: 'Trusted senders saved.' } } : { profileMsg: { text: 'Voice saved.' } });
     }
   });
+}
+
+async function issueKey(deps, userId, label) {
+  const { key, kid } = newKeyMaterial();
+  const hash = await hashKey(key);
+  const added = await deps.userDo(userId).addKey({ kid, hash, label });
+  if (!added.ok) return null;
+  await deps.kv.put(`apikey:${hash}`, JSON.stringify({ uid: userId, kid, created: deps.now(), label }));
+  return key;
+}
+
+export async function handleBootstrap(request, deps) {
+  const read = await readForm(request, deps);
+  if (read.error) return read.error;
+  const { session } = read;
+  if (session.rec.intent !== 'connect') return messagePage('Forbidden', 'This session cannot manage assistant keys.', 403);
+  const userId = session.rec.uid;
+  if (!(await deps.userDo(userId).consumeLimit({ name: 'keys' })).allowed) {
+    return messagePage('Too many changes', 'Too many changes. Please wait a minute and try again.', 429);
+  }
+  const key = await issueKey(deps, userId, 'assistant');
+  if (!key) {
+    const csrf = await csrfFor(deps, session.sid);
+    return destinationFormPage({ csrf, error: 'You already have the maximum number of active keys. Revoke one first.', manage: await manageFor(userId, deps) });
+  }
+  return keyCreatedPage({ key, specUrl: `${deps.config.baseUrl}/api/v1/spec` });
 }
 
 export function handleKeyCreate(request, deps) {
@@ -361,11 +393,8 @@ export function handleKeyCreate(request, deps) {
     async apply({ form, userId, page }) {
       const label = String(form.get('label') || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
       if ([...label].length > API_KEY_LABEL_MAX) return page(`The label can be at most ${API_KEY_LABEL_MAX} characters.`);
-      const { key, kid } = newKeyMaterial();
-      const hash = await hashKey(key);
-      const added = await deps.userDo(userId).addKey({ kid, hash, label });
-      if (!added.ok) return page('You already have the maximum number of active keys. Revoke one first.');
-      await deps.kv.put(`apikey:${hash}`, JSON.stringify({ uid: userId, kid, created: deps.now(), label }));
+      const key = await issueKey(deps, userId, label);
+      if (!key) return page('You already have the maximum number of active keys. Revoke one first.');
       return keyCreatedPage({ key, specUrl: `${deps.config.baseUrl}/api/v1/spec` });
     }
   });
@@ -384,3 +413,84 @@ export function handleKeyRevoke(request, deps) {
     }
   });
 }
+
+const VERIFIERS = {
+  grok: (entry, deps) => verifyGrok({ entry, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts }),
+  cursor: (entry, deps) => verifyCursor({ entry, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts }),
+  claude_routine: (entry, deps) => verifyClaude({ entry, fetchImpl: deps.fetchImpl, validateOpts: deps.validateOpts })
+};
+
+async function applyRequest(deps, userId, rec, form) {
+  const doc = deps.userDo(userId);
+  const route = await deps.routing.get(userId);
+  const claim = async () => ((await doc.reqResolve({ id: rec.id, status: 'approved' })).ok ? null : 'That request is no longer pending.');
+  const p = rec.payload;
+  if (rec.type === 'destination') {
+    if (form.get('attest') !== '1') return 'The training attestation is required.';
+    const checked = checkDestinationInput({ destType: p.dest_type, url: p.url, secret: p.secret }, deps.validateOpts);
+    if (checked.error) return checked.error;
+    if (!(await doc.consumeRegistration()).allowed) return 'Too many registration attempts. Please try again later.';
+    const entry = { dest_type: p.dest_type, url: checked.url, secret_or_bearer: checked.secret, mode: p.dest_type === 'claude_routine' ? 'nudge' : 'full' };
+    for (const k of ['filters', 'caps', 'trusted_users', 'voice']) if (route && route[k] !== undefined) entry[k] = route[k];
+    const verified = await VERIFIERS[p.dest_type](entry, deps);
+    if (verified.kind !== 'ok') return `Verification failed (${verified.kind}${verified.status ? ` ${verified.status}` : ''}). The request is still pending; you can try again.`;
+    const lost = await claim();
+    if (lost) return lost;
+    await deps.routing.put(userId, entry);
+    await doc.markConnected();
+    return null;
+  }
+  if (!route) return 'Save a destination first. The request is still pending.';
+  if (rec.type === 'enable_send') {
+    const was = effectiveCaps(route.caps);
+    const sent = new URLSearchParams({
+      process: was.process ? '1' : '',
+      draft: was.draft ? '1' : '',
+      send: '1',
+      confirm_send: form.get('confirm_send') || '',
+      send_word: form.get('send_word') || ''
+    });
+    const parsed = parseCapsForm(sent, { ...was, send: false });
+    if (parsed.error) return parsed.error;
+    const lost = await claim();
+    if (lost) return lost;
+    await deps.routing.put(userId, { ...route, caps: parsed.caps });
+    return null;
+  }
+  const merged = normalizeIds([...effectiveTrusted(route.trusted_users), ...p.user_ids], TRUSTED_MAX);
+  if (merged.error) return `${merged.error} The request is still pending.`;
+  const lost = await claim();
+  if (lost) return lost;
+  await deps.routing.put(userId, { ...route, trusted_users: merged.ids });
+  return null;
+}
+
+async function decideRequest(request, deps, approve) {
+  const read = await readForm(request, deps);
+  if (read.error) return read.error;
+  const { session, form } = read;
+  if (session.rec.intent !== 'connect') return messagePage('Forbidden', 'This session cannot decide requests.', 403);
+  const userId = session.rec.uid;
+  const csrf = await csrfFor(deps, session.sid);
+  const page = async (error, extra) => destinationFormPage({ csrf, error, manage: await manageFor(userId, deps, extra) });
+  if (!(await deps.userDo(userId).consumeLimit({ name: 'decide' })).allowed) {
+    return messagePage('Too many changes', 'Too many changes. Please wait a minute and try again.', 429);
+  }
+  const id = String(form.get('id') || '');
+  const rec = REQUEST_ID.test(id) ? (await deps.userDo(userId).reqGet({ id })).request : null;
+  if (!rec || rec.status !== 'pending' || !rec.payload) {
+    return page('That request was not found or is no longer pending. It may have expired or already been handled.');
+  }
+  if (!approve) {
+    if (!(await deps.userDo(userId).reqResolve({ id, status: 'rejected' })).ok) return page('That request is no longer pending.');
+    await deps.userDo(userId).logChange({ via: 'approval', fields: [`request:${rec.type}:rejected`] });
+    return page(undefined, { requestMsg: { ok: true, text: 'Request rejected. Nothing was changed.' } });
+  }
+  const failure = await applyRequest(deps, userId, rec, form);
+  if (failure) return page(failure);
+  await deps.userDo(userId).logChange({ via: 'approval', fields: [`request:${rec.type}`] });
+  return page(undefined, { requestMsg: { ok: true, text: 'Request approved and applied.' } });
+}
+
+export const handleRequestApprove = (request, deps) => decideRequest(request, deps, true);
+export const handleRequestReject = (request, deps) => decideRequest(request, deps, false);

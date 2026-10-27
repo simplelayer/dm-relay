@@ -9,6 +9,10 @@ import {
   FILTER_COUNTER_NAMES,
   HOUR_MS,
   LIMITS,
+  REQUEST_MAX_KEPT,
+  REQUEST_MAX_PENDING,
+  REQUEST_TTL_MS,
+  REQUEST_TYPES,
   NUDGE_INTERVAL_MS,
   NUDGE_RETRY_DELAY_MS,
   REGISTRATION_LIMIT,
@@ -37,6 +41,10 @@ const METHODS = new Set([
   'revokeKey',
   'consumeApiKey',
   'logChange',
+  'reqCreate',
+  'reqList',
+  'reqGet',
+  'reqResolve',
   'status',
   'wipe'
 ]);
@@ -174,10 +182,69 @@ export class UserDOCore {
   }
 
   logChange({ via, fields }) {
-    if (via !== 'browser' && via !== 'api') throw new Error('E_DO_CHANGE');
+    if (via !== 'browser' && via !== 'api' && via !== 'approval') throw new Error('E_DO_CHANGE');
     if (!Array.isArray(fields) || fields.length === 0 || !fields.every((f) => CHANGE_FIELDS.includes(f))) throw new Error('E_DO_CHANGE');
     this.s.put('clog', [{ t: this.now(), via, fields: [...new Set(fields)] }, ...(this.s.get('clog') || [])].slice(0, CHANGE_LOG_MAX));
     return { ok: true };
+  }
+
+  #reqs() {
+    const now = this.now();
+    const all = this.s.get('reqs') || [];
+    let changed = false;
+    const out = all.map((r) => {
+      if (r.status === 'pending' && r.expires <= now) {
+        changed = true;
+        return { ...r, status: 'expired', payload: null };
+      }
+      return r;
+    });
+    if (changed) this.s.put('reqs', out);
+    return out;
+  }
+
+  reqCreate({ id, type, summary, detail, payload }) {
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(id)) throw new Error('E_DO_REQ');
+    if (!REQUEST_TYPES.includes(type) || typeof summary !== 'string' || summary.length > 300) throw new Error('E_DO_REQ');
+    if (payload === null || typeof payload !== 'object' || detail === null || typeof detail !== 'object') throw new Error('E_DO_REQ');
+    const all = this.#reqs();
+    const pending = all.filter((r) => r.status === 'pending');
+    const same = JSON.stringify(payload);
+    const dup = pending.find((r) => r.type === type && JSON.stringify(r.payload) === same);
+    if (dup) return { ok: true, duplicate: true, id: dup.id, type: dup.type, status: 'pending', expires: dup.expires };
+    if (pending.length >= REQUEST_MAX_PENDING) return { ok: false, error: 'max_pending' };
+    const now = this.now();
+    const rec = { id, type, status: 'pending', created: now, expires: now + REQUEST_TTL_MS, summary, detail, payload };
+    this.s.put('reqs', [rec, ...all].slice(0, REQUEST_MAX_KEPT));
+    return { ok: true, duplicate: false, id, type, status: 'pending', expires: rec.expires };
+  }
+
+  reqList() {
+    return { requests: this.#reqs().map(({ payload, ...meta }) => meta) };
+  }
+
+  reqGet({ id }) {
+    return { request: this.#reqs().find((r) => r.id === id) || null };
+  }
+
+  reqResolve({ id, status }) {
+    if (status !== 'approved' && status !== 'rejected' && status !== 'cancelled') throw new Error('E_DO_REQ');
+    const all = this.#reqs();
+    const rec = all.find((r) => r.id === id);
+    if (!rec || rec.status !== 'pending') return { ok: false };
+    this.s.put('reqs', all.map((r) => (r.id === id ? { ...r, status, payload: null } : r)));
+    return { ok: true, type: rec.type };
+  }
+
+  #hourly() {
+    const hour = Math.floor(this.now() / HOUR_MS);
+    const hb = this.s.get('hb') || {};
+    const out = [];
+    for (let h = hour - STATS_HOURS + 1; h <= hour; h++) {
+      const v = hb[h] || [0, 0, 0];
+      out.push({ t: h * HOUR_MS, delivered: v[0], filtered: v[1], failed: v[2] });
+    }
+    return out;
   }
 
   status() {
@@ -190,6 +257,8 @@ export class UserDOCore {
       filtered,
       deliveries: this.s.get('dlog') || [],
       last24h: this.#last24h(),
+      hourly: this.#hourly(),
+      pending_requests: this.#reqs().filter((r) => r.status === 'pending').length,
       changes: this.s.get('clog') || [],
       last_nudge: this.s.get('last_nudge') ?? null,
       disconnected: this.s.get('disconnected') === true, connecting: (this.s.get('connecting_until') || 0) > this.now() };

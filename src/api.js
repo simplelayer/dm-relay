@@ -1,8 +1,9 @@
-import { API_BODY_MAX, API_KEY_MAX, API_RATE, CHANGE_LOG_MAX, FILTER_KEYWORD_MAX_LENGTH, FILTER_MAX_KEYWORDS, FILTER_MAX_USERS, LIMITS, TRUSTED_MAX, VOICE_MAX } from './constants.js';
+import { API_BODY_MAX, API_KEY_MAX, API_RATE, CHANGE_LOG_MAX, REQUEST_MAX_PENDING, REQUEST_TRUSTED_MAX, REQUEST_TTL_MS, FILTER_KEYWORD_MAX_LENGTH, FILTER_MAX_KEYWORDS, FILTER_MAX_USERS, LIMITS, TRUSTED_MAX, VOICE_MAX } from './constants.js';
 import { hashKey, KEY_PATTERN } from './apikeys.js';
 import { cleanVoice, effectiveCaps, effectiveTrusted, effectiveVoice, normalizeIds } from './caps.js';
 import { effectiveFilters, validateFilters } from './filter.js';
 import { PROMPT_TYPES, buildPrompt } from './prompts.js';
+import { newRequestId, parseRequestBody } from './requests.js';
 import { runTestFire, saveSettings, summaryFrom } from './settings.js';
 
 const DEST_NAMES = { grok: 'Grok automation webhook', cursor: 'Cursor automation webhook', claude_routine: 'Claude routine' };
@@ -37,6 +38,10 @@ function specDoc(baseUrl) {
       voice_max_characters: VOICE_MAX,
       filters: { skip_users_max: FILTER_MAX_USERS, keywords_max: FILTER_MAX_KEYWORDS, keyword_max_characters: FILTER_KEYWORD_MAX_LENGTH },
       test_per_minute: LIMITS.test.limit,
+      request_proposals_per_minute: LIMITS.requests.limit,
+      pending_requests_max: REQUEST_MAX_PENDING,
+      request_lifetime_hours: REQUEST_TTL_MS / 3600000,
+      add_trusted_ids_per_request: REQUEST_TRUSTED_MAX,
       change_log_entries: CHANGE_LOG_MAX
     },
     endpoints: [
@@ -58,11 +63,32 @@ function specDoc(baseUrl) {
       },
       { method: 'GET', path: '/api/v1/prompt?type=cursor|grok|claude_routine', auth: true, description: 'The current generated automation prompt. type defaults to the saved destination type.' },
       { method: 'GET', path: '/api/v1/status', auth: true, description: 'Summary, last 24 hour counts, delivery log and recent settings changes. No message content.' },
-      { method: 'POST', path: '/api/v1/test', auth: true, description: 'Send the synthetic connection test to the saved destination. Same 3 per minute limit as the browser button.' }
+      { method: 'POST', path: '/api/v1/test', auth: true, description: 'Send the synthetic connection test to the saved destination. Same 3 per minute limit as the browser button.' },
+      { method: 'GET', path: '/api/v1/setup', auth: true, description: 'Setup checklist computed from real state: {steps:[{id,title,done,actor,how,url}], next_step}. actor is assistant or human. Start here and follow next_step. Contains no secrets.' },
+      {
+        method: 'POST',
+        path: '/api/v1/requests',
+        auth: true,
+        description: 'Propose a sensitive change. Nothing is applied: a human must approve it in the browser at /connect (Approve or Reject). Returns {id, type, status: pending, expires}. Max 5 pending, identical pending requests are deduplicated (200 with the existing id), unknown fields return 400, requests expire after 24 hours.',
+        types: {
+          destination: { dest_type: 'grok | cursor | claude_routine', url: 'the webhook or fire URL (validated now, contacted only after approval)', secret: 'signing secret or bearer token (held only inside the pending request, never returned by any response)' },
+          enable_send: {},
+          add_trusted: { user_ids: 'array of 1 to 10 Slack user IDs' }
+        }
+      },
+      { method: 'GET', path: '/api/v1/requests', auth: true, description: 'Your requests: id, type, summary, status (pending, approved, rejected, expired, cancelled), created, expires. Never secrets.' },
+      { method: 'DELETE', path: '/api/v1/requests/<id>', auth: true, description: 'Cancel one of your own pending requests.' }
+    ],
+    request_flow: [
+      '1. GET /api/v1/setup and follow next_step.',
+      '2. POST /api/v1/requests with the change you want. Tell the user a request is waiting and that they must open /connect and click Approve.',
+      '3. The user approves or rejects in the browser. Destination approval needs a training attestation; send approval needs a confirmation box and the typed word SEND.',
+      '4. Poll GET /api/v1/requests (or /api/v1/setup) to see the status. Do not retry rejected requests without asking.'
     ],
     cannot: [
       'enable caps.send',
-      'add trusted senders (it can only remove them)',
+      'add trusted senders directly (it can only remove them, or propose additions as an approval request)',
+      'approve, reject or apply a request: destination, send and trusted-sender additions are applied only by the human in the browser',
       'change the destination URL, secret or type',
       'create or revoke assistant keys',
       'disconnect or delete the user',
@@ -192,12 +218,110 @@ const ROUTES = {
   '/api/v1/settings': ['GET', 'PATCH'],
   '/api/v1/prompt': ['GET'],
   '/api/v1/status': ['GET'],
-  '/api/v1/test': ['POST']
+  '/api/v1/test': ['POST'],
+  '/api/v1/setup': ['GET'],
+  '/api/v1/requests': ['GET', 'POST']
 };
+const REQUEST_PATH = /^\/api\/v1\/requests\/([A-Za-z0-9_-]{22})$/;
+
+const publicRequest = (r) => ({ id: r.id, type: r.type, summary: r.summary, status: r.status, created: iso(r.created), expires: iso(r.expires) });
+
+function setupView(base, route, st, requests) {
+  const connect = `${base}/connect`;
+  const connected = Boolean(route);
+  const pendingDest = requests.some((r) => r.type === 'destination' && r.status === 'pending');
+  const test = (st.deliveries || []).some((d) => d.test === true && d.o === 'ok');
+  const delivered = (st.deliveries || []).some((d) => !d.test && d.o === 'ok') || (st.counters && st.counters.forwarded > 0);
+  const steps = [
+    {
+      id: 'slack_sign_in',
+      title: 'The user signs in with Slack',
+      done: connected,
+      actor: 'human',
+      how: `The user opens ${connect} and signs in with Slack. They have already done this if you hold a key. It counts as complete once a destination is saved.`,
+      url: connect
+    },
+    {
+      id: 'destination',
+      title: 'Save a destination',
+      done: connected,
+      actor: pendingDest ? 'human' : 'assistant',
+      how: pendingDest
+        ? `A destination request is waiting. Ask the user to open ${connect} and click Approve (they must tick the training attestation).`
+        : 'POST /api/v1/requests with {"type":"destination","dest_type":"grok|cursor|claude_routine","url":"...","secret":"..."}. Then ask the user to approve it at /connect. The URL is validated now and contacted only after approval.',
+      url: pendingDest ? connect : `${base}/api/v1/requests`
+    },
+    { id: 'test', title: 'Run a connection test', done: test, actor: 'assistant', how: 'POST /api/v1/test. A harmless synthetic message is sent to the saved destination.', url: `${base}/api/v1/test` },
+    {
+      id: 'prompt',
+      title: 'Install the automation prompt',
+      done: false,
+      actor: 'assistant',
+      how: 'GET /api/v1/prompt and paste the text into your own automation (Grok, Cursor or Claude routine). This cannot be detected, so it is never marked done.',
+      url: `${base}/api/v1/prompt`
+    },
+    {
+      id: 'first_delivery',
+      title: 'A real DM is delivered',
+      done: Boolean(delivered),
+      actor: 'human',
+      how: 'Ask the user to send themselves a DM from another account or wait for one. This is done when a real delivery succeeds.',
+      url: `${base}/api/v1/status`
+    },
+    {
+      id: 'voice',
+      title: 'Set a reply voice (optional)',
+      done: effectiveVoice(route && route.voice) !== '',
+      actor: 'assistant',
+      optional: true,
+      how: 'PATCH /api/v1/settings with {"voice":"..."}. Do not put secrets in it.',
+      url: `${base}/api/v1/settings`
+    },
+    {
+      id: 'trusted_senders',
+      title: 'Add trusted senders (optional)',
+      done: effectiveTrusted(route && route.trusted_users).length > 0,
+      actor: 'assistant',
+      optional: true,
+      how: `POST /api/v1/requests with {"type":"add_trusted","user_ids":[...]}; the user approves at ${connect}.`,
+      url: `${base}/api/v1/requests`
+    }
+  ];
+  const next = steps.find((x) => !x.done && !x.optional && x.id !== 'slack_sign_in' && !(x.id === 'prompt' && delivered));
+  return { steps, next_step: next ? next.id : null, pending_requests: requests.filter((r) => r.status === 'pending').length };
+}
+
+async function handleRequests(deps, userId, pathname, method, body) {
+  const doc = deps.userDo(userId);
+  const match = REQUEST_PATH.exec(pathname);
+  if (match) {
+    const res = await doc.reqResolve({ id: match[1], status: 'cancelled' });
+    if (!res.ok) return fail(404, 'not_found', 'No pending request with that id.');
+    return json({ id: match[1], status: 'cancelled' });
+  }
+  if (method === 'GET') return json({ requests: (await doc.reqList()).requests.map(publicRequest) });
+  if (!(await doc.consumeLimit({ name: 'requests' })).allowed) {
+    return json({ error: 'rate_limited', message: `At most ${LIMITS.requests.limit} proposals per minute.` }, 429, { 'retry-after': '60' });
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body.bytes));
+  } catch {
+    return fail(400, 'bad_request', 'The body must be valid JSON.');
+  }
+  const req = parseRequestBody(parsed, deps.validateOpts);
+  if (req.error) return fail(400, 'bad_request', req.error);
+  const route = await deps.routing.get(userId);
+  if (req.type !== 'destination' && !route) return fail(409, 'not_connected', 'Save a destination first.');
+  if (req.type === 'enable_send' && effectiveCaps(route.caps).send) return fail(409, 'already_enabled', 'Send is already on.');
+  const made = await doc.reqCreate({ id: newRequestId(), type: req.type, summary: req.summary, detail: req.detail, payload: req.payload });
+  if (!made.ok) return fail(409, 'too_many_pending', `At most ${REQUEST_MAX_PENDING} requests can be pending. Cancel one or wait for the user.`);
+  return json({ id: made.id, type: made.type, status: 'pending', expires: iso(made.expires) }, made.duplicate ? 200 : 201);
+}
 
 export async function handleApi(request, deps, pathname) {
   const method = request.method;
-  const methods = ROUTES[pathname];
+  const methods = REQUEST_PATH.test(pathname) ? ['DELETE'] : ROUTES[pathname];
   if (!methods) return fail(404, 'not_found', 'No such endpoint.');
   if (!methods.includes(method)) return json({ error: 'method_not_allowed' }, 405, { allow: methods.join(', ') });
   if (pathname === '/api/v1/spec') return json(specDoc(deps.config.baseUrl));
@@ -210,6 +334,11 @@ export async function handleApi(request, deps, pathname) {
   const body = await readBody(request);
   if (body.tooLarge) return fail(413, 'too_large', `The request body is limited to ${API_BODY_MAX} bytes.`);
 
+  if (pathname === '/api/v1/setup') {
+    const [st, route, requests] = await Promise.all([deps.userDo(userId).status(), deps.routing.get(userId), deps.userDo(userId).reqList()]);
+    return json(setupView(deps.config.baseUrl, route, st, requests.requests));
+  }
+  if (pathname === '/api/v1/requests' || REQUEST_PATH.test(pathname)) return handleRequests(deps, userId, pathname, method, body);
   if (pathname === '/api/v1/settings' && method === 'GET') return json(await settingsView(userId, deps));
   if (pathname === '/api/v1/settings') {
     let parsed;

@@ -223,7 +223,7 @@ for (const [name, headers, ok] of ORIGIN_CASES) {
       assert.notEqual(await w.routing.get(U1), null);
     } else {
       assert.equal(res.status, 403);
-      assert.match(await res.text(), /Cross-origin request refused/);
+      assert.match(await res.text(), /did not come from this site/);
       assert.equal(await w.routing.get(U1), null);
     }
   });
@@ -238,7 +238,7 @@ for (const [name, headers, ok] of ORIGIN_CASES) {
       assert.equal((await w.entry(U1).core.check()).disconnected, true);
     } else {
       assert.equal(res.status, 403);
-      assert.match(await res.text(), /Cross-origin request refused/);
+      assert.match(await res.text(), /did not come from this site/);
       assert.equal((await w.entry(U1).core.check()).disconnected, false);
     }
   });
@@ -251,14 +251,14 @@ test('origin policy g: bad CSRF token is still 403 with a good origin (both endp
     const l = await login(w);
     const r1 = await post(w, '/destination', l.cookie, grokFields('A'.repeat(43)), headers);
     assert.equal(r1.status, 403);
-    assert.match(await r1.text(), /Invalid request token/);
+    assert.match(await r1.text(), /out of date or was not opened from DM Relay/);
     assert.equal(await w.routing.get(U1), null);
     const w2 = world();
     await w2.addGrok(U1);
     const d = await login(w2, 'disconnect', U1);
     const r2 = await post(w2, '/disconnect/confirm', d.cookie, { csrf: 'bad' }, headers);
     assert.equal(r2.status, 403);
-    assert.match(await r2.text(), /Invalid request token/);
+    assert.match(await r2.text(), /out of date or was not opened from DM Relay/);
     assert.equal((await w2.entry(U1).core.check()).disconnected, false);
   }
 });

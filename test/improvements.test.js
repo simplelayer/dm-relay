@@ -151,7 +151,7 @@ test('1: the delivery log is shown only on the owner status view', async () => {
   await w.entry(U1).core.call('recordDelivery', { dest: 'cursor', outcome: 'timeout' });
   const mine = await login(w, 'status', U1);
   assert.match(mine.html, /Recent deliveries/);
-  assert.match(mine.html, /cursor timeout/);
+  assert.match(mine.html, /<td>cursor<\/td><td><span class="badge bad">timeout<\/span><\/td>/);
   assert.equal(mine.html.includes('http_503'), false);
   const bare = await (await w.request('/status')).text();
   assert.equal(/Recent deliveries/.test(bare), false);

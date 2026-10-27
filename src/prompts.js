@@ -76,4 +76,9 @@ export function promptsFor(route) {
   return (only ? [only] : PROMPT_TYPES).map((p) => ({ ...p, text: buildPrompt({ type: p.type, ...settings }) }));
 }
 
+export function allPromptsFor(route) {
+  const settings = route ? { caps: route.caps, voice: route.voice, trusted: route.trusted_users } : {};
+  return PROMPT_TYPES.map((p) => ({ ...p, primary: Boolean(route) && p.type === route.dest_type, text: buildPrompt({ type: p.type, ...settings }) }));
+}
+
 export const PROMPTS = promptsFor(null);

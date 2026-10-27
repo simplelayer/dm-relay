@@ -6,9 +6,12 @@ import {
   handleDestination,
   handleDisconnectConfirm,
   handleFilters,
+  handleBootstrap,
   handleKeyCreate,
   handleKeyRevoke,
   handleProfile,
+  handleRequestApprove,
+  handleRequestReject,
   handleTestFire,
   startFlow
 } from './oauth.js';
@@ -63,7 +66,10 @@ export async function route(request, deps, waitUntil) {
   if (method === 'POST' && pathname === '/profile') return handleProfile(request, deps);
   if (method === 'POST' && pathname === '/keys/create') return handleKeyCreate(request, deps);
   if (method === 'POST' && pathname === '/keys/revoke') return handleKeyRevoke(request, deps);
-  if (pathname.startsWith('/api/v1/')) return handleApi(request, deps, pathname);
+  if (method === 'POST' && pathname === '/keys/bootstrap') return handleBootstrap(request, deps);
+  if (method === 'POST' && pathname === '/requests/approve') return handleRequestApprove(request, deps);
+  if (method === 'POST' && pathname === '/requests/reject') return handleRequestReject(request, deps);
+  if (pathname.startsWith('/api/v1/'))return handleApi(request, deps, pathname);
   if (method === 'POST' && pathname === '/disconnect/confirm') return handleDisconnectConfirm(request, deps);
   if (method === 'GET' && pathname === '/oauth/callback') return handleCallback(request, deps);
   if (method === 'GET' && (pathname === '/connect' || pathname === '/disconnect' || pathname === '/status')) {

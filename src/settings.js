@@ -48,7 +48,9 @@ export function summaryFrom(st, route, labels) {
     last24h: st.last24h,
     filtered: st.filtered,
     deliveries: st.deliveries,
-    changes: st.changes || []
+    changes: st.changes || [],
+    hourly: st.hourly || [],
+    pendingRequests: st.pending_requests || 0
   };
 }
 

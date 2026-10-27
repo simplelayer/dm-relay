@@ -59,7 +59,9 @@ export const LIMITS = {
   filters: { limit: 10, windowMs: 60000 },
   caps: { limit: 10, windowMs: 60000 },
   profile: { limit: 10, windowMs: 60000 },
-  keys: { limit: 10, windowMs: 60000 }
+  keys: { limit: 10, windowMs: 60000 },
+  requests: { limit: 10, windowMs: 60000 },
+  decide: { limit: 10, windowMs: 60000 }
 };
 
 export const FILTER_MAX_KEYWORDS = 20;
@@ -76,4 +78,17 @@ export const API_KEY_LABEL_MAX = 40;
 export const API_BODY_MAX = 8192;
 export const API_RATE = { limit: 60, windowMs: 60000 };
 export const CHANGE_LOG_MAX = 20;
-export const CHANGE_FIELDS = ['caps.process', 'caps.draft', 'caps.send', 'filters', 'trusted_users', 'voice'];
+export const REQUEST_TYPES = ['destination', 'enable_send', 'add_trusted'];
+export const REQUEST_TTL_MS = 86400000;
+export const REQUEST_MAX_PENDING = 5;
+export const REQUEST_MAX_KEPT = 20;
+export const REQUEST_TRUSTED_MAX = 10;
+export const CHANGE_FIELDS = [
+  'caps.process',
+  'caps.draft',
+  'caps.send',
+  'filters',
+  'trusted_users',
+  'voice',
+  ...REQUEST_TYPES.flatMap((t) => [`request:${t}`, `request:${t}:rejected`])
+];
