@@ -24,7 +24,7 @@ export const CLAUDE_HOST = 'api.anthropic.com';
 export const CLAUDE_FIRE_PATH = /^\/v1\/claude_code\/routines\/[A-Za-z0-9_-]{1,128}\/fire$/;
 export const ANTHROPIC_VERSION = '2023-06-01';
 
-// TODO(P6): replace with the beta header value confirmed by firing a routine by hand.
+// P6 confirmed 2026-10-26: a routine fire with this beta header was accepted (verification run succeeded).
 export const CLAUDE_ROUTINE_BETA_HEADER = 'experimental-cc-routine-2026-04-01';
 
 // P7 confirmed 2026-10-26: real Grok webhook endpoint is grok.com/webhook/automation/<id>; relay delivery accepted (2 runs succeeded).
@@ -48,3 +48,17 @@ export const CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action '
 export const COUNTER_NAMES = ['forwarded', 'dropped', 'errors', 'fanout_degraded', 'coalesced', 'timeouts'];
 
 export const OPERATOR_HOST_SUFFIXES = [];
+
+export const DELIVERY_LOG_MAX = 20;
+export const HOUR_MS = 3600000;
+export const STATS_HOURS = 24;
+
+export const LIMITS = {
+  test: { limit: 3, windowMs: 60000 },
+  filters: { limit: 10, windowMs: 60000 }
+};
+
+export const FILTER_MAX_KEYWORDS = 20;
+export const FILTER_KEYWORD_MAX_LENGTH = 50;
+export const FILTER_MAX_USERS = 50;
+export const FILTER_COUNTER_NAMES = ['filtered_bot', 'filtered_sender', 'filtered_keyword'];

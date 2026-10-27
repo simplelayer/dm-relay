@@ -20,9 +20,23 @@ A small Cloudflare Worker that lets individual Slack workspace members opt in to
 3. `grok` destinations receive a Standard Webhooks signed JSON POST. `cursor` destinations receive the same JSON body with an `Authorization: Bearer crsr_...` header and no signing; the URL must be `https://api2.cursor.sh/automations/webhook/<uuid>`. `claude_routine` destinations are nudged through a per-user Durable Object that coalesces activity to one run per 5 minutes with a trailing edge.
 4. `/connect`, `/disconnect` and `/status` each start a Slack OAuth round trip. Identity comes only from that round trip, never from a form field.
 
+## Delivery log, test button, prompts, filters, status
+
+All of these are on the authenticated pages that follow the Slack sign-in, so identity always comes from the OAuth round trip.
+
+- **Delivery log.** The per-user Durable Object keeps the last 20 delivery events: time, destination type (cursor, grok, claude) and outcome (`ok`, `http_<status>`, `timeout`, `error_network`, `error_invalid`, `error_other`). No message text, channel or sender. It is shown only on that user's own `/status` view and wiped on disconnect. Hourly delivered, filtered and failed counts (the last 24 hourly buckets) are kept the same way.
+- **Test button.** `/connect` (after sign-in) shows the saved destination (type and host only) with a "Send test" button. It posts to `/destination/test` with the same session, CSRF token and origin checks as the other actions, limited to 3 tests per minute per user. It sends a synthetic payload (`relay_test: true`, fixed connection-test text, no Slack event needed) through the same SSRF re-validation and signing or bearer code as real deliveries, with one attempt and no retry, and shows pass or fail with the HTTP status. The result is logged as a test and not counted in the 24 hour totals. A Claude routine test fires one real run.
+- **Automation prompts.** Draft-only prompts for Cursor, Grok and Claude routines (`src/prompts.js`), each telling the automation to read the forwarded DM, draft a reply for review, and never send, post or call Slack send tools. The copy button needs one inline script, so that page alone adds `script-src 'nonce-...'` (fresh nonce per response, no inline handlers, no external script). Every other page keeps the strict no-script policy.
+- **Filters.** Per user, saved on the routing entry through `POST /filters`: skip bot messages (on by default), skip listed Slack user IDs (up to 50), skip messages containing keywords (case-insensitive, up to 20 keywords of at most 50 characters). Matching happens in memory on the in-flight message; a drop only increments a per-reason counter (`filtered_bot`, `filtered_sender`, `filtered_keyword`). Bot-authored messages (a `bot_id` and no subtype) now reach the per-user stage so the setting means something; every other global drop (subtypes, edits, files, external, hidden, Slackbot) is unchanged and unconditional. The rules are operator-readable configuration, not message data.
+- **Status.** `/status` shows connected yes or no, destinations, last delivery time and outcome, and the 24 hour delivered, filtered and failed counts, then the recent delivery log. The raw all-time counters are in a collapsed details element.
+
+## Deploy script
+
+`scripts/deploy.ps1` is a one-way pipeline from this repo to the public copy. With no flags it is a dry run: it runs the tests, checks the working tree, lists what would change, scans the publish set for secrets, and stops. `-AllowDirty` permits a dirty tree. `-Deploy` syncs, scans, then runs `npx wrangler deploy`. `-Push -Message "..."` syncs, scans, then commits and pushes the public copy on `main`. The scan aborts on `crsr_`, `whsec_`, `xoxb-`, `xoxp-`, `xapp-`, `sk-ant`, Bearer tokens and long values assigned to token or secret keys, apart from the exact fake test fixtures listed in the script. The public copy never flows back into this repo.
+
 ## Layout
 
-`src/index.js` routing and wiring; `slack-verify.js`, `filter.js`, `fanout.js`, `standard-webhooks.js`, `destinations.js`, `ssrf.js`, `oauth.js`, `pages.js`, `user-do.js`, `routes.js`, `events.js`, `util.js`, `constants.js`. There are no runtime dependencies. Pure logic runs in plain Node.
+`src/index.js` routing and wiring; `slack-verify.js`, `filter.js`, `fanout.js`, `standard-webhooks.js`, `destinations.js`, `ssrf.js`, `oauth.js`, `pages.js`, `user-do.js`, `routes.js`, `events.js`, `util.js`, `constants.js`, `delivery-log.js`, `prompts.js`. There are no runtime dependencies. Pure logic runs in plain Node.
 
 ## Tests
 
@@ -40,4 +54,4 @@ Uses `node:test` on Node 24. No network access and no credentials are needed; `f
 4. Set secrets with `wrangler secret put`: `SLACK_SIGNING_SECRET`, `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_APP_TOKEN` (app-level token with `authorizations:read`), `STATE_HMAC_KEY` (long random string).
 5. `wrangler deploy`. The Durable Object uses the SQLite backend (`new_sqlite_classes` migration).
 
-Before relying on a destination type, confirm the open probes recorded in the spec: `TODO(P6)` (Claude routine beta header) and `TODO(P7)` (Grok host pattern) and `TODO(P12)` (Cursor host and token character set) in `src/constants.js`.
+Probes P6 (Claude routine beta header), P7 (Grok host pattern) and P12 (Cursor host and token character set) were confirmed live on 2026-10-26; see the comments in `src/constants.js`.

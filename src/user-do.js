@@ -1,10 +1,16 @@
 import {
   COUNTER_NAMES,
+  DELIVERY_LOG_MAX,
+  FILTER_COUNTER_NAMES,
+  HOUR_MS,
+  LIMITS,
   NUDGE_INTERVAL_MS,
   NUDGE_RETRY_DELAY_MS,
   REGISTRATION_LIMIT,
-  REGISTRATION_WINDOW_MS
+  REGISTRATION_WINDOW_MS,
+  STATS_HOURS
 } from './constants.js';
+import { outcomeLabel, sanitizeDelivery } from './delivery-log.js';
 import { fireNudge, isDefiniteFailure } from './destinations.js';
 import { kvRouting } from './routes.js';
 import { parseOwnHosts } from './ssrf.js';
@@ -17,6 +23,9 @@ const METHODS = new Set([
   'markConnected',
   'markConnecting',
   'consumeRegistration',
+  'consumeLimit',
+  'recordDelivery',
+  'recordFiltered',
   'status',
   'wipe'
 ]);
@@ -40,7 +49,7 @@ export class UserDOCore {
   }
 
   increment({ name }) {
-    if (!COUNTER_NAMES.includes(name)) throw new Error('E_DO_COUNTER');
+    if (!COUNTER_NAMES.includes(name) && !FILTER_COUNTER_NAMES.includes(name)) throw new Error('E_DO_COUNTER');
     this.#inc(name);
     return { ok: true };
   }
@@ -49,10 +58,78 @@ export class UserDOCore {
     this.s.put(`c:${name}`, (this.s.get(`c:${name}`) || 0) + 1);
   }
 
+  #bump(slot) {
+    const hour = Math.floor(this.now() / HOUR_MS);
+    const buckets = {};
+    for (const [k, v] of Object.entries(this.s.get('hb') || {})) {
+      if (Number(k) > hour - STATS_HOURS) buckets[k] = v;
+    }
+    const b = buckets[hour] ? [...buckets[hour]] : [0, 0, 0];
+    b[slot] += 1;
+    buckets[hour] = b;
+    this.s.put('hb', buckets);
+  }
+
+  #last24h() {
+    const hour = Math.floor(this.now() / HOUR_MS);
+    const out = { delivered: 0, filtered: 0, failed: 0 };
+    for (const [k, v] of Object.entries(this.s.get('hb') || {})) {
+      if (Number(k) <= hour - STATS_HOURS) continue;
+      out.delivered += v[0];
+      out.filtered += v[1];
+      out.failed += v[2];
+    }
+    return out;
+  }
+
+  #logDelivery(entry) {
+    const log = [entry, ...(this.s.get('dlog') || [])].slice(0, DELIVERY_LOG_MAX);
+    this.s.put('dlog', log);
+  }
+
+  recordDelivery({ dest, outcome, test }) {
+    const entry = sanitizeDelivery({ dest, outcome, test }, this.now());
+    if (entry === null) throw new Error('E_DO_DELIVERY');
+    this.#logDelivery(entry);
+    if (!entry.test) this.#bump(entry.o === 'ok' ? 0 : 2);
+    return { ok: true };
+  }
+
+  recordFiltered({ reason }) {
+    const name = `filtered_${reason}`;
+    if (!FILTER_COUNTER_NAMES.includes(name)) throw new Error('E_DO_COUNTER');
+    this.#inc(name);
+    this.#bump(1);
+    return { ok: true };
+  }
+
+  consumeLimit({ name }) {
+    const cfg = LIMITS[name];
+    if (!cfg) throw new Error('E_DO_LIMIT');
+    const now = this.now();
+    const key = `lim:${name}`;
+    let [start, count] = this.s.get(key) || [null, 0];
+    if (start == null || now - start >= cfg.windowMs) {
+      start = now;
+      count = 0;
+    }
+    if (count >= cfg.limit) return { allowed: false };
+    this.s.put(key, [start, count + 1]);
+    return { allowed: true };
+  }
+
   status() {
     const counters = {};
     for (const n of COUNTER_NAMES) counters[n] = this.s.get(`c:${n}`) || 0;
-    return { counters, last_nudge: this.s.get('last_nudge') ?? null, disconnected: this.s.get('disconnected') === true, connecting: (this.s.get('connecting_until') || 0) > this.now() };
+    const filtered = {};
+    for (const n of FILTER_COUNTER_NAMES) filtered[n.slice('filtered_'.length)] = this.s.get(`c:${n}`) || 0;
+    return {
+      counters,
+      filtered,
+      deliveries: this.s.get('dlog') || [],
+      last24h: this.#last24h(),
+      last_nudge: this.s.get('last_nudge') ?? null,
+      disconnected: this.s.get('disconnected') === true, connecting: (this.s.get('connecting_until') || 0) > this.now() };
   }
 
   #clearPending() {
@@ -154,6 +231,7 @@ export class UserDOCore {
     } catch {
       outcome = { kind: 'network' };
     }
+    this.recordDelivery({ dest: 'claude', outcome: outcomeLabel(outcome) });
     if (outcome.kind === 'ok') {
       this.s.put('fail_streak', 0);
       this.#inc('forwarded');

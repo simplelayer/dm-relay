@@ -1,6 +1,7 @@
 import { WAIT_UNTIL_BUDGET_MS } from './constants.js';
 import { forwardCursor, forwardGrok } from './destinations.js';
-import { buildForwardPayload, checkEnvelope, filterMessageEvent } from './filter.js';
+import { destLabel, outcomeLabel } from './delivery-log.js';
+import { applyUserFilters, buildForwardPayload, checkEnvelope, filterMessageEvent } from './filter.js';
 import { resolveRecipients } from './fanout.js';
 import { isUserId } from './routes.js';
 import { verifySlackSignature } from './slack-verify.js';
@@ -15,6 +16,11 @@ async function deliver(recipient, payload, deps, deadlineMs) {
   try {
     if ((await userDo.check()).disconnected) {
       await userDo.increment({ name: 'dropped' });
+      return;
+    }
+    const verdict = applyUserFilters(payload.event, entry.filters);
+    if (!verdict.forward) {
+      await userDo.recordFiltered({ reason: verdict.reason });
       return;
     }
     if (entry.dest_type === 'claude_routine') {
@@ -38,6 +44,7 @@ async function deliver(recipient, payload, deps, deadlineMs) {
     if (result.kind === 'ok') await userDo.increment({ name: 'forwarded' });
     else if (result.kind === 'invalid') await userDo.increment({ name: 'dropped' });
     else await userDo.increment({ name: 'errors' });
+    await userDo.recordDelivery({ dest: destLabel(entry.dest_type), outcome: outcomeLabel(result) });
   } catch {
     console.error('E_DELIVER');
   }
@@ -66,7 +73,7 @@ export async function processEvent(payload, deps) {
     await handleRevocation(event, deps);
     return;
   }
-  if (!filterMessageEvent(payload).forward) return;
+  if (!filterMessageEvent(payload, { allowBots: true }).forward) return;
 
   const { recipients, degraded } = await resolveRecipients({
     payload,

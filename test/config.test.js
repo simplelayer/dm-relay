@@ -52,8 +52,3 @@ test('src has no runtime dependencies (only relative and cloudflare-free imports
     for (const m of code.matchAll(/from\s+'([^']+)'/g)) assert.ok(m[1].startsWith('./'), `${f}: ${m[1]}`);
   }
 });
-
-test('P6 marker exists next to the unconfirmed constant (P7 confirmed live 2026-10-26)', () => {
-  const c = readFileSync(join(ROOT, 'src/constants.js'), 'utf8');
-  assert.match(c, /TODO\(P6\)[^\n]*\nexport const CLAUDE_ROUTINE_BETA_HEADER/);
-});

@@ -1,13 +1,18 @@
+import { FILTER_KEYWORD_MAX_LENGTH, FILTER_MAX_KEYWORDS, FILTER_MAX_USERS } from './constants.js';
+import { isUserId } from './routes.js';
+
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
+
 export function checkEnvelope(payload, { teamId, appId }) {
   return Boolean(payload) && payload.team_id === teamId && payload.api_app_id === appId;
 }
 
-export function filterMessageEvent(payload) {
+export function filterMessageEvent(payload, { allowBots = false } = {}) {
   const ev = payload && payload.event;
   if (!ev || typeof ev !== 'object') return { forward: false, reason: 'no_event' };
   if (ev.type !== 'message') return { forward: false, reason: 'type' };
   if (ev.subtype !== undefined) return { forward: false, reason: 'subtype' };
-  if (ev.bot_id !== undefined) return { forward: false, reason: 'bot' };
+  if (ev.bot_id !== undefined && !allowBots) return { forward: false, reason: 'bot' };
   if (ev.hidden === true) return { forward: false, reason: 'hidden' };
   if (typeof ev.user !== 'string' || ev.user === '' || ev.user === 'USLACKBOT') {
     return { forward: false, reason: 'user' };
@@ -35,4 +40,50 @@ export function buildForwardPayload(payload, nowMs) {
     ts: ev.ts,
     thread_ts: typeof ev.thread_ts === 'string' ? ev.thread_ts : null
   };
+}
+
+export function effectiveFilters(raw) {
+  const f = raw && typeof raw === 'object' ? raw : {};
+  return {
+    skip_bots: f.skip_bots !== false,
+    skip_users: Array.isArray(f.skip_users) ? f.skip_users.filter(isUserId) : [],
+    keywords: Array.isArray(f.keywords) ? f.keywords.filter((k) => typeof k === 'string' && k !== '') : []
+  };
+}
+
+export function applyUserFilters(ev, rawFilters) {
+  const f = effectiveFilters(rawFilters);
+  if (f.skip_bots && ev.bot_id !== undefined) return { forward: false, reason: 'bot' };
+  if (f.skip_users.includes(ev.user)) return { forward: false, reason: 'sender' };
+  if (f.keywords.length > 0 && typeof ev.text === 'string') {
+    const text = ev.text.toLowerCase();
+    if (f.keywords.some((k) => text.includes(k.toLowerCase()))) return { forward: false, reason: 'keyword' };
+  }
+  return { forward: true, reason: 'ok' };
+}
+
+export function parseFilterForm(form) {
+  const users = [];
+  for (const part of String(form.get('skip_users') || '').split(/[\s,;]+/)) {
+    if (part === '') continue;
+    const id = part.toUpperCase();
+    if (!isUserId(id)) return { error: 'Slack user IDs look like U01ABCDEF2 (letters and digits, starting with U or W).' };
+    if (!users.includes(id)) users.push(id);
+  }
+  if (users.length > FILTER_MAX_USERS) return { error: `At most ${FILTER_MAX_USERS} user IDs.` };
+
+  const keywords = [];
+  const seen = new Set();
+  for (const line of String(form.get('keywords') || '').split(/\r?\n/)) {
+    const k = line.replace(CONTROL_CHARS, '').trim();
+    if (k === '') continue;
+    if ([...k].length > FILTER_KEYWORD_MAX_LENGTH) return { error: `Each keyword can be at most ${FILTER_KEYWORD_MAX_LENGTH} characters.` };
+    const key = k.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    keywords.push(k);
+  }
+  if (keywords.length > FILTER_MAX_KEYWORDS) return { error: `At most ${FILTER_MAX_KEYWORDS} keywords.` };
+
+  return { filters: { skip_bots: form.get('skip_bots') === '1', skip_users: users, keywords } };
 }

@@ -1,5 +1,5 @@
 import { handleSlackEvents } from './events.js';
-import { handleCallback, handleDestination, handleDisconnectConfirm, startFlow } from './oauth.js';
+import { handleCallback, handleDestination, handleDisconnectConfirm, handleFilters, handleTestFire, startFlow } from './oauth.js';
 import { messagePage } from './pages.js';
 import { kvRouting } from './routes.js';
 import { parseOwnHosts } from './ssrf.js';
@@ -45,6 +45,8 @@ export async function route(request, deps, waitUntil) {
   const method = request.method;
   if (method === 'POST' && pathname === '/slack/events') return handleSlackEvents(request, deps, waitUntil);
   if (method === 'POST' && pathname === '/destination') return handleDestination(request, deps);
+  if (method === 'POST' && pathname === '/destination/test') return handleTestFire(request, deps);
+  if (method === 'POST' && pathname === '/filters') return handleFilters(request, deps);
   if (method === 'POST' && pathname === '/disconnect/confirm') return handleDisconnectConfirm(request, deps);
   if (method === 'GET' && pathname === '/oauth/callback') return handleCallback(request, deps);
   if (method === 'GET' && (pathname === '/connect' || pathname === '/disconnect' || pathname === '/status')) {

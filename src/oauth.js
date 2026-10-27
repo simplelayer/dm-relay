@@ -1,5 +1,7 @@
 import { REQUIRED_SCOPES, SESSION_TTL_S, SLACK_API, SLACK_AUTHORIZE_URL, STATE_TTL_S } from './constants.js';
-import { isValidCursorToken, verifyClaude, verifyCursor, verifyGrok } from './destinations.js';
+import { destLabel, outcomeLabel } from './delivery-log.js';
+import { fireTest, isValidCursorToken, verifyClaude, verifyCursor, verifyGrok } from './destinations.js';
+import { effectiveFilters, parseFilterForm } from './filter.js';
 import {
   connectPage,
   destinationFormPage,
@@ -18,6 +20,24 @@ const SESSION_COOKIE = 'dmr_sess';
 const INTENTS = ['connect', 'disconnect', 'status'];
 const TOKEN_ID = /^[A-Za-z0-9_-]{43}$/;
 const ATTRS = 'HttpOnly; Secure; SameSite=Lax';
+
+const DEST_NAMES = { grok: 'Grok automation webhook', cursor: 'Cursor automation webhook', claude_routine: 'Claude routine' };
+
+function describeDestination(route) {
+  if (!route) return null;
+  let host = '';
+  try {
+    host = new URL(route.url).hostname;
+  } catch {
+    host = '';
+  }
+  return { type: destLabel(route.dest_type), label: DEST_NAMES[route.dest_type] || 'Destination', host };
+}
+
+async function manageFor(userId, deps, extra = {}) {
+  const route = await deps.routing.get(userId);
+  return { destination: describeDestination(route), filters: effectiveFilters(route && route.filters), ...extra };
+}
 
 async function mac(deps, message) {
   return b64urlEncode(await hmacSha256(utf8(deps.config.stateKey), utf8(message)));
@@ -140,7 +160,20 @@ export async function handleCallback(request, deps) {
     const st = await deps.userDo(userId).status();
     const route = await deps.routing.get(userId);
     if (!st.connecting && !route) await revokeToken(token, deps);
-    const res = statusPage({ counters: st.counters, lastNudge: st.last_nudge, showNudge: route?.dest_type === 'claude_routine' });
+    const dest = describeDestination(route);
+    const res = statusPage({
+      counters: st.counters,
+      lastNudge: st.last_nudge,
+      showNudge: route?.dest_type === 'claude_routine',
+      summary: {
+        connected: Boolean(route) && !st.disconnected,
+        destinations: dest ? [dest] : [],
+        lastDelivery: st.deliveries.find((d) => !d.test) || null,
+        last24h: st.last24h,
+        filtered: st.filtered,
+        deliveries: st.deliveries
+      }
+    });
     res.headers.append('set-cookie', clear);
     return res;
   }
@@ -148,7 +181,7 @@ export async function handleCallback(request, deps) {
   const record = intent === 'disconnect' ? { uid: userId, intent, token } : { uid: userId, intent };
   const { sid, cookie } = await mintSession(record, deps);
   const csrf = await csrfFor(deps, sid);
-  const res = intent === 'connect' ? destinationFormPage({ csrf }) : disconnectConfirmPage({ csrf });
+  const res = intent === 'connect' ? destinationFormPage({ csrf, manage: await manageFor(userId, deps) }) : disconnectConfirmPage({ csrf });
   res.headers.append('set-cookie', clear);
   res.headers.append('set-cookie', cookie);
   return res;
@@ -181,34 +214,36 @@ export async function handleDestination(request, deps) {
   if (session.rec.intent !== 'connect') return messagePage('Forbidden', 'This session cannot register a destination.', 403);
   const userId = session.rec.uid;
   const csrf = await csrfFor(deps, session.sid);
-  const retry = (msg) => destinationFormPage({ csrf, error: msg });
+  const retry = async (msg) => destinationFormPage({ csrf, error: msg, manage: await manageFor(userId, deps) });
 
   if (!(await deps.userDo(userId).consumeRegistration()).allowed) {
     return messagePage('Too many attempts', 'Too many registration attempts. Please try again later.', 429);
   }
   const destType = form.get('dest_type');
-  if (destType !== 'grok' && destType !== 'claude_routine' && destType !== 'cursor') return retry('Choose a destination type.');
-  if (form.get('attest') !== '1' || form.get('no_send') !== '1') return retry('Both confirmations are required.');
+  if (destType !== 'grok' && destType !== 'claude_routine' && destType !== 'cursor') return await retry('Choose a destination type.');
+  if (form.get('attest') !== '1' || form.get('no_send') !== '1') return await retry('Both confirmations are required.');
   const secret = (form.get('secret') || '').trim();
   const v = validateDestinationUrl((form.get('url') || '').trim(), { type: destType, ...deps.validateOpts });
-  if (!v.ok) return retry('That URL is not allowed.');
-  if (destType === 'grok' && !isValidSecret(secret)) return retry('The signing secret must start with whsec_ and be valid base64.');
-  if (destType === 'claude_routine' && secret === '') return retry('A bearer token is required.');
-  if (destType === 'cursor' && !isValidCursorToken(secret)) return retry('The bearer token must start with crsr_ and contain only letters, digits, hyphens and underscores (20 to 200 characters).');
+  if (!v.ok) return await retry('That URL is not allowed.');
+  if (destType === 'grok' && !isValidSecret(secret)) return await retry('The signing secret must start with whsec_ and be valid base64.');
+  if (destType === 'claude_routine' && secret === '') return await retry('A bearer token is required.');
+  if (destType === 'cursor' && !isValidCursorToken(secret)) return await retry('The bearer token must start with crsr_ and contain only letters, digits, hyphens and underscores (20 to 200 characters).');
 
+  const previous = await deps.routing.get(userId);
   const entry = {
     dest_type: destType,
     url: v.url.href,
     secret_or_bearer: secret,
     mode: destType === 'claude_routine' ? 'nudge' : 'full'
   };
+  if (previous && previous.filters) entry.filters = previous.filters;
   const verifiers = {
     grok: () => verifyGrok({ entry, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts }),
     cursor: () => verifyCursor({ entry, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts }),
     claude_routine: () => verifyClaude({ entry, fetchImpl: deps.fetchImpl, validateOpts: deps.validateOpts })
   };
   const verified = await verifiers[destType]();
-  if (verified.kind !== 'ok') return retry(`Verification failed (${verified.kind}${verified.status ? ` ${verified.status}` : ''}). You can try again.`);
+  if (verified.kind !== 'ok') return await retry(`Verification failed (${verified.kind}${verified.status ? ` ${verified.status}` : ''}). You can try again.`);
 
   await deps.routing.put(userId, entry);
   await deps.userDo(userId).markConnected();
@@ -233,4 +268,45 @@ export async function handleDisconnectConfirm(request, deps) {
   const res = disconnectedPage({ revoked });
   res.headers.append('set-cookie', clearSession);
   return res;
+}
+
+export async function handleTestFire(request, deps) {
+  const read = await readForm(request, deps);
+  if (read.error) return read.error;
+  const { session } = read;
+  if (session.rec.intent !== 'connect') return messagePage('Forbidden', 'This session cannot send a test.', 403);
+  const userId = session.rec.uid;
+  const csrf = await csrfFor(deps, session.sid);
+  const page = async (extra, error) => destinationFormPage({ csrf, error, manage: await manageFor(userId, deps, extra) });
+
+  if (!(await deps.userDo(userId).consumeLimit({ name: 'test' })).allowed) {
+    return messagePage('Too many tests', 'Too many tests. Please wait a minute and try again.', 429);
+  }
+  const route = await deps.routing.get(userId);
+  if (!route) return page({}, 'Save a destination first.');
+  const result = await fireTest({ entry: route, userId, fetchImpl: deps.fetchImpl, now: deps.now, validateOpts: deps.validateOpts });
+  const outcome = outcomeLabel(result);
+  await deps.userDo(userId).recordDelivery({ dest: destLabel(route.dest_type), outcome, test: true });
+  const ok = result.kind === 'ok';
+  const text = ok ? `HTTP ${result.status}` : `${outcome}${result.status ? ` (HTTP ${result.status})` : ''}`;
+  return page({ testResult: { ok, text } });
+}
+
+export async function handleFilters(request, deps) {
+  const read = await readForm(request, deps);
+  if (read.error) return read.error;
+  const { session, form } = read;
+  if (session.rec.intent !== 'connect') return messagePage('Forbidden', 'This session cannot change filters.', 403);
+  const userId = session.rec.uid;
+  const csrf = await csrfFor(deps, session.sid);
+
+  if (!(await deps.userDo(userId).consumeLimit({ name: 'filters' })).allowed) {
+    return messagePage('Too many changes', 'Too many filter changes. Please wait a minute and try again.', 429);
+  }
+  const route = await deps.routing.get(userId);
+  if (!route) return destinationFormPage({ csrf, error: 'Save a destination before setting filters.', manage: await manageFor(userId, deps) });
+  const parsed = parseFilterForm(form);
+  if (parsed.error) return destinationFormPage({ csrf, error: parsed.error, manage: await manageFor(userId, deps) });
+  await deps.routing.put(userId, { ...route, filters: parsed.filters });
+  return destinationFormPage({ csrf, manage: await manageFor(userId, deps, { filterMsg: { text: 'Filters saved.' } }) });
 }

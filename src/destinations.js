@@ -171,3 +171,33 @@ export async function verifyCursor({ entry, fetchImpl, now, validateOpts }) {
   };
   return sendCursorOnce({ entry, bodyBytes: utf8(JSON.stringify(body)), fetchImpl, timeoutMs: FORWARD_TIMEOUT_MS, validateOpts });
 }
+
+export async function fireTest({ entry, userId, fetchImpl, now, validateOpts }) {
+  if (entry.dest_type === 'claude_routine') return verifyClaude({ entry, fetchImpl, validateOpts });
+  const nowMs = now();
+  const forwardPayload = {
+    event_id: `evt_test_${randomBase64Url(12)}`,
+    received_at: new Date(nowMs).toISOString(),
+    type: 'dm',
+    channel_id: 'DTESTCONN',
+    sender_id: 'UTESTCONN',
+    text: VERIFY_TEXT,
+    ts: `${Math.floor(nowMs / 1000)}.000000`,
+    thread_ts: null,
+    relay_test: true
+  };
+  const bodyBytes = utf8(JSON.stringify(forwardPayload));
+  if (entry.dest_type === 'cursor') return sendCursorOnce({ entry, bodyBytes, fetchImpl, timeoutMs: FORWARD_TIMEOUT_MS, validateOpts });
+  if (entry.dest_type === 'grok') {
+    return sendGrokOnce({
+      entry,
+      bodyBytes,
+      webhookId: `${forwardPayload.event_id}_${userId}`,
+      nowMs,
+      fetchImpl,
+      timeoutMs: FORWARD_TIMEOUT_MS,
+      validateOpts
+    });
+  }
+  return { kind: 'invalid' };
+}
