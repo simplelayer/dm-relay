@@ -19,9 +19,12 @@ import {
 import { messagePage } from './pages.js';
 import { kvRouting } from './routes.js';
 import { parseOwnHosts } from './ssrf.js';
+import { makeEventDedupeClient, EventDedupeDO } from './event-dedupe-do.js';
+import { routeCryptoFromEnv } from './secret-crypto.js';
 import { makeDoClient } from './user-do.js';
 
 export { UserDO } from './user-do.js';
+export { EventDedupeDO } from './event-dedupe-do.js';
 
 const ROUTED_SAMPLE = { at: -Infinity, ids: null };
 
@@ -46,12 +49,14 @@ export function makeDeps(env, overrides = {}) {
       stateKey: env.STATE_HMAC_KEY
     },
     kv: env.ROUTES,
-    routing: kvRouting(env.ROUTES),
+    routing: kvRouting(env.ROUTES, routeCryptoFromEnv(env)),
+    eventDedupe: makeEventDedupeClient(env.EVENT_DEDUPE_DO),
     userDo: makeDoClient(env.USER_DO),
     fetchImpl: (...args) => fetch(...args),
     now: () => Date.now(),
     routedSample: ROUTED_SAMPLE,
     validateOpts: { ownHosts: parseOwnHosts(env.OPERATOR_HOSTS).concat(baseHost) },
+    routeCrypto: routeCryptoFromEnv(env),
     ...overrides
   };
 }

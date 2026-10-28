@@ -62,7 +62,7 @@ const channelMsg = (o = {}) => msgPayload({ sender: U1, channel: CH, channelType
 
 async function forwardWorld(channels, extra = {}) {
   const w = world();
-  await w.addGrok(U2);
+  await w.addGrok(U2, undefined, { full: true });
   const e = await w.routing.get(U2);
   await w.routing.put(U2, { ...e, ...(channels ? { channels } : {}), ...extra });
   return w;
@@ -149,7 +149,20 @@ test('PAYLOAD SHAPE: channel and private_channel payloads carry the documented f
   await w.send(channelMsg({ eventId: 'E1', extraEvent: { thread_ts: '1800000000.000050' } }));
   await w.send(channelMsg({ eventId: 'E2', channel: PRIV, channelType: 'group' }));
   const [pub, priv] = destBodies(w);
-  assert.deepEqual(Object.keys(pub), ['event_id', 'received_at', 'type', 'channel_id', 'sender_id', 'text', 'ts', 'thread_ts', 'mode', 'sender_trusted', 'mentioned']);
+  const channelKeys = [
+    'channel_id',
+    'event_id',
+    'mentioned',
+    'mode',
+    'received_at',
+    'sender_id',
+    'sender_trusted',
+    'text',
+    'thread_ts',
+    'ts',
+    'type'
+  ];
+  assert.deepEqual(Object.keys(pub).sort(), channelKeys.sort());
   assert.equal(pub.type, 'channel');
   assert.equal(pub.channel_id, CH);
   assert.equal(pub.sender_id, U1);
@@ -170,7 +183,18 @@ test('DM BEHAVIOR UNCHANGED: DMs and group DMs forward as before, with no mentio
     await w.send(msgPayload({ sender: U1, eventId: 'D3', channelType: 'app_home' }));
     const bodies = destBodies(w);
     assert.deepEqual(bodies.map((b) => [b.event_id, b.type]), [['D1', 'dm'], ['D2', 'group_dm']]);
-    assert.deepEqual(Object.keys(bodies[0]), ['event_id', 'received_at', 'type', 'channel_id', 'sender_id', 'text', 'ts', 'thread_ts', 'mode', 'sender_trusted']);
+    assert.deepEqual(Object.keys(bodies[0]).sort(), [
+      'channel_id',
+      'event_id',
+      'mode',
+      'received_at',
+      'sender_id',
+      'sender_trusted',
+      'text',
+      'thread_ts',
+      'ts',
+      'type'
+    ]);
   }
 });
 

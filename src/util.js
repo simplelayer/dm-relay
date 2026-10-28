@@ -41,6 +41,11 @@ export function b64urlEncode(bytes) {
   return b64encode(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
+export function b64urlDecode(str) {
+  const pad = (4 - (str.length % 4)) % 4;
+  return b64decode(str.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat(pad));
+}
+
 export async function hmacSha256(keyBytes, dataBytes) {
   const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return new Uint8Array(await crypto.subtle.sign('HMAC', key, dataBytes));

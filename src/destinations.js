@@ -140,26 +140,31 @@ export function isValidCursorToken(token) {
   );
 }
 
-async function sendCursorOnce({ entry, bodyBytes, fetchImpl, timeoutMs, validateOpts }) {
+async function sendCursorOnce({ entry, bodyBytes, idempotencyKey, fetchImpl, timeoutMs, validateOpts }) {
   const v = validateDestinationUrl(entry.url, { ...validateOpts, type: 'cursor' });
   if (!v.ok || !isValidCursorToken(entry.secret_or_bearer)) return { kind: 'invalid' };
   const headers = {
     'content-type': 'application/json',
     authorization: `Bearer ${entry.secret_or_bearer}`
   };
+  if (idempotencyKey) headers['idempotency-key'] = idempotencyKey;
   return send(v.url.href, { method: 'POST', headers, body: bodyBytes }, fetchImpl, timeoutMs);
 }
 
 const cursorRetryable = (r) =>
   r.kind === 'rate_limited' || (r.kind === 'http_error' && (r.status === 408 || r.status === 503));
 
-export async function forwardCursor({ entry, forwardPayload, fetchImpl, now, deadlineMs, validateOpts }) {
+export async function forwardCursor({ entry, forwardPayload, recipientId, fetchImpl, now, deadlineMs, validateOpts }) {
   const bodyBytes = utf8(JSON.stringify(forwardPayload));
-  return forwardWithRetry((timeoutMs) => sendCursorOnce({ entry, bodyBytes, fetchImpl, timeoutMs, validateOpts }), {
-    now,
-    deadlineMs,
-    retryable: cursorRetryable
-  });
+  const idempotencyKey = `${forwardPayload.event_id}_${recipientId || 'unknown'}`;
+  return forwardWithRetry(
+    (timeoutMs) => sendCursorOnce({ entry, bodyBytes, idempotencyKey, fetchImpl, timeoutMs, validateOpts }),
+    {
+      now,
+      deadlineMs,
+      retryable: cursorRetryable
+    }
+  );
 }
 
 export async function verifyCursor({ entry, fetchImpl, now, validateOpts }) {

@@ -191,7 +191,9 @@ test('SECURITY: the destination secret never leaves the pending request store', 
     assert.equal(text.includes('123e4567-e89b-12d3'), false, 'path hidden');
   }
   assert.ok(page.html.includes('api2.cursor.sh'));
-  assert.ok(doDump(w).includes(CURSOR_TOKEN), 'the secret exists only in the pending request');
+  const pendingDump = doDump(w);
+  assert.equal(pendingDump.includes(CURSOR_TOKEN), false, 'pending secret is encrypted at rest');
+  assert.ok(pendingDump.includes('secret_enc'), 'the encrypted secret exists only in the pending request');
   assert.equal(doDumpWithoutReqs(w).includes(CURSOR_TOKEN), false);
   assert.equal(kvDump(w).includes(CURSOR_TOKEN), false);
 
@@ -436,7 +438,7 @@ test('SECURITY: destination approval needs the attestation, runs verification, a
   const after = await w.routing.get(U1);
   assert.equal(after.dest_type, 'cursor');
   assert.equal(after.url, CURSOR_URL);
-  assert.equal(after.mode, 'full');
+  assert.equal(after.mode, 'ids_only');
   assert.deepEqual(after.caps, { process: true, draft: false, send: false });
   assert.deepEqual(after.filters.skip_users, [U3]);
   assert.deepEqual(after.trusted_users, [U2]);
@@ -499,7 +501,7 @@ test('SECURITY: all requests are wiped on disconnect, tokens_revoked and app_uni
     await propose(w, key, cursorBody());
     await propose(w, key, { type: 'enable_send' });
     assert.equal((await reqs(w)).length, 2);
-    assert.ok(doDump(w).includes(CURSOR_TOKEN));
+    assert.ok(doDump(w).includes('secret_enc'));
     if (mode === 'disconnect') {
       const d = await login(w, 'disconnect');
       assert.equal((await post(w, '/disconnect/confirm', d, {})).status, 200);

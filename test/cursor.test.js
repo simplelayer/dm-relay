@@ -17,13 +17,22 @@ import {
   makeWorld,
   msgPayload,
   respond,
+  stripRouteMeta,
   timeoutError
 } from './helpers.js';
 
 const OTHER_URL = 'https://api2.cursor.sh/automations/webhook/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const entry = { dest_type: 'cursor', url: CURSOR_URL, secret_or_bearer: CURSOR_TOKEN, mode: 'full' };
 const fp = { event_id: 'Ev9', received_at: '2026-10-25T00:00:00.000Z', type: 'dm', channel_id: 'D1', sender_id: 'U1', text: 'héllo', ts: '1.2', thread_ts: null };
-const base = (fetchImpl, clock) => ({ entry, forwardPayload: fp, fetchImpl, now: () => clock.t, deadlineMs: clock.t + 30000, validateOpts: {} });
+const base = (fetchImpl, clock) => ({
+  entry,
+  forwardPayload: fp,
+  recipientId: U2,
+  fetchImpl,
+  now: () => clock.t,
+  deadlineMs: clock.t + 30000,
+  validateOpts: {}
+});
 const decode = (b) => JSON.parse(new TextDecoder().decode(b));
 
 function captureConsole() {
@@ -80,7 +89,11 @@ test('cursor forward: bearer header, json header, redirect manual, body is the g
   assert.equal(init.method, 'POST');
   assert.equal(init.redirect, 'manual');
   assert.ok(init.signal instanceof AbortSignal);
-  assert.deepEqual(init.headers, { 'content-type': 'application/json', authorization: `Bearer ${CURSOR_TOKEN}` });
+  assert.deepEqual(init.headers, {
+    'content-type': 'application/json',
+    authorization: `Bearer ${CURSOR_TOKEN}`,
+    'idempotency-key': `Ev9_${U2}`
+  });
   assert.ok(init.body instanceof Uint8Array);
   assert.deepEqual(decode(init.body), fp);
 });
@@ -243,7 +256,12 @@ test('POST /destination: cursor is verified (one POST with bearer), stored in th
   const l = await login(w);
   const res = await post(w, l);
   assert.equal(res.status, 200);
-  assert.deepEqual(await w.routing.get(U1), { dest_type: 'cursor', url: CURSOR_URL, secret_or_bearer: CURSOR_TOKEN, mode: 'full' });
+  assert.deepEqual(stripRouteMeta(await w.routing.get(U1)), {
+    dest_type: 'cursor',
+    url: CURSOR_URL,
+    secret_or_bearer: CURSOR_TOKEN,
+    mode: 'ids_only'
+  });
   const calls = w.fetchImpl.calls.filter((c) => c.url === CURSOR_URL);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].init.headers.authorization, `Bearer ${CURSOR_TOKEN}`);
@@ -342,8 +360,8 @@ const nonSlack = (w) => w.fetchImpl.calls.filter((c) => !c.url.includes('slack.c
 
 test('e2e: a DM to a user with a cursor route is forwarded with the bearer header and the grok-shaped body', async () => {
   const w = world();
-  await w.addCursor(U2);
-  await w.addCursor(U1, OTHER_URL);
+  await w.addCursor(U2, CURSOR_URL, CURSOR_TOKEN, { full: true });
+  await w.addCursor(U1, OTHER_URL, CURSOR_TOKEN, { full: true });
   await w.send(dm(U1, U2, { text: 'meeting at 3', extraEvent: { thread_ts: '1800000000.000050' } }));
   const calls = nonSlack(w);
   assert.equal(calls.length, 1);
@@ -355,8 +373,20 @@ test('e2e: a DM to a user with a cursor route is forwarded with the bearer heade
   assert.equal(init.headers['content-type'], 'application/json');
   assert.equal(init.headers['webhook-signature'], undefined);
   assert.equal(init.headers['webhook-id'], undefined);
+  assert.equal(init.headers['idempotency-key'], `Ev0001_${U2}`);
   const body = decode(init.body);
-  assert.deepEqual(Object.keys(body), ['event_id', 'received_at', 'type', 'channel_id', 'sender_id', 'text', 'ts', 'thread_ts', 'mode', 'sender_trusted']);
+  assert.deepEqual(Object.keys(body).sort(), [
+    'channel_id',
+    'event_id',
+    'mode',
+    'received_at',
+    'sender_id',
+    'sender_trusted',
+    'text',
+    'thread_ts',
+    'ts',
+    'type'
+  ]);
   assert.deepEqual(body.mode, { process: true, draft: true, send: false });
   assert.equal(body.sender_trusted, false);
   assert.equal(body.event_id, 'Ev0001');

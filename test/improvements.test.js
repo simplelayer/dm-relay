@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { DELIVERY_LOG_MAX, HOUR_MS, VERIFY_TEXT } from '../src/constants.js';
 import { applyUserFilters, effectiveFilters, filterMessageEvent, parseFilterForm } from '../src/filter.js';
@@ -116,6 +116,7 @@ test('1: the log keeps only the newest 20 events', async () => {
   const w = world();
   await w.addGrok(U2);
   for (let i = 0; i < 25; i++) {
+    if (i > 0 && i % 5 === 0) w.clock.t += 300001;
     w.clock.t += 1000;
     await w.send(msg({ eventId: `E${i}` }));
   }
@@ -129,7 +130,7 @@ test('1: the log holds no message text, channel names or sender identity', async
   const w = world();
   await w.addGrok(U2);
   await w.send(msg({ channel: 'D0PRIVATEXYZ' }));
-  const dump = JSON.stringify([...w.entry(U2).storage.map.entries()]);
+  const dump = JSON.stringify(w.entry(U2).storage.get('dlog'));
   for (const s of [SECRET_TEXT, 'D0PRIVATEXYZ', U1]) assert.equal(dump.includes(s), false, s);
   assert.ok(w.entry(U2).storage.get('dlog').length === 1);
 });
@@ -374,9 +375,10 @@ test('4: skipped sender and keyword filters drop the message, count by reason, a
   await w.send(msg({ eventId: 'E3', text: 'nothing to see' }));
   assert.equal(hookCalls(w).length, 1);
   const s = await st(w, U2);
-  assert.deepEqual(s.filtered, { bot: 0, sender: 1, keyword: 1 });
+  assert.deepEqual(s.filtered, { bot: 0, sender: 1, keyword: 1, loop: 0, rate: 0, secret_stale: 0 });
   assert.deepEqual(s.last24h, { delivered: 1, filtered: 2, failed: 0 });
-  const dump = JSON.stringify([...w.entry(U2).storage.map.entries()]);
+  const entries = [...w.entry(U2).storage.map.entries()].filter(([k]) => !String(k).startsWith('fwd:'));
+  const dump = JSON.stringify(entries);
   for (const x of ['Secret Message', 'very', U1, 'D0CHAN1']) assert.equal(dump.includes(x), false, x);
 });
 
@@ -498,7 +500,7 @@ test('5: statusPage still renders with only the old arguments and escapes everyt
       destinations: [{ label: '<b>x</b>', host: '"><i>' }],
       lastDelivery: null,
       last24h: { delivered: 0, filtered: 0, failed: 0 },
-      filtered: { bot: 0, sender: 0, keyword: 0 },
+      filtered: { bot: 0, sender: 0, keyword: 0, loop: 0, rate: 0, secret_stale: 0 },
       deliveries: []
     }
   }).text();
@@ -513,9 +515,10 @@ test('/connect discloses the delivery log and the filter rules', async () => {
   assert.match(html, /deleted when you disconnect/);
 });
 
-const deployScript = readFileSync(new URL('../scripts/deploy.ps1', import.meta.url), 'utf8');
+const deployPath = new URL('../scripts/deploy.ps1', import.meta.url);
+const deployScript = existsSync(deployPath) ? readFileSync(deployPath, 'utf8') : '';
 
-test('deploy script: only syncs source to public, never the reverse', () => {
+test('deploy script: only syncs source to public, never the reverse', { skip: !deployScript }, () => {
   const copies = deployScript.match(/Copy-Item[^\n]*/g) || [];
   assert.equal(copies.length, 1);
   assert.match(copies[0], /-LiteralPath \(Join-Path \$Source \$a\.Path\) -Destination \$target/);
@@ -523,7 +526,7 @@ test('deploy script: only syncs source to public, never the reverse', () => {
   assert.match(deployScript, /\$DryRun = -not \(\$Deploy -or \$Push\)/);
 });
 
-test('deploy script: wrangler, commit and push are each behind their own switch', () => {
+test('deploy script: wrangler, commit and push are each behind their own switch', { skip: !deployScript }, () => {
   assert.match(deployScript, /if \(\$Deploy\) \{\s*Push-Location \$Source\s*try \{ Invoke-Native 'wrangler deploy'/);
   assert.match(deployScript, /if \(\$Push\) \{[\s\S]*git -C \$Public commit[\s\S]*git -C \$Public push origin main/);
   assert.match(deployScript, /-Push requires -Message/);

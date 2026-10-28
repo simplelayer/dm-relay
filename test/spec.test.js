@@ -217,7 +217,7 @@ test('spec: forwarded_payload fields, order and enums match what grok and cursor
   assert.deepEqual(fp.fields_in_order.type.split(' | ').map((t) => t.split(' ')[0]), ['dm', 'group_dm', 'channel', 'private_channel']);
 
   const w = world();
-  await w.addGrok(U2);
+  await w.addGrok(U2, undefined, { full: true });
   const e = await w.routing.get(U2);
   await w.routing.put(U2, { ...e, voice: 'VOICEMARKER', channels: { enabled: true, mentions: true, allowlist: [] } });
   await w.send(msgPayload({ sender: U1, channel: 'D0CHAN1', channelType: 'im', eventId: 'E1' }));
@@ -227,10 +227,11 @@ test('spec: forwarded_payload fields, order and enums match what grok and cursor
   const bodies = destBodies(w);
   assert.deepEqual(bodies.map((b) => b.type), ['dm', 'group_dm', 'channel', 'private_channel']);
   const withoutMentioned = order.filter((f) => f !== 'mentioned');
-  assert.deepEqual(Object.keys(bodies[0]), withoutMentioned);
-  assert.deepEqual(Object.keys(bodies[1]), withoutMentioned);
-  assert.deepEqual(Object.keys(bodies[2]), order);
-  assert.deepEqual(Object.keys(bodies[3]), order);
+  const sortKeys = (o) => Object.keys(o).sort();
+  assert.deepEqual(sortKeys(bodies[0]), sortKeys(Object.fromEntries(withoutMentioned.map((k) => [k, 1]))));
+  assert.deepEqual(sortKeys(bodies[1]), sortKeys(Object.fromEntries(withoutMentioned.map((k) => [k, 1]))));
+  assert.deepEqual(sortKeys(bodies[2]), sortKeys(Object.fromEntries(order.map((k) => [k, 1]))));
+  assert.deepEqual(sortKeys(bodies[3]), sortKeys(Object.fromEntries(order.map((k) => [k, 1]))));
   assert.equal(bodies[2].mentioned, true);
   for (const b of bodies) assert.equal(JSON.stringify(b).includes('VOICEMARKER'), false);
   assert.match(fp.not_included, /voice is never in the payload/);

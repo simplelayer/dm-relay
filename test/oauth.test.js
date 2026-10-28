@@ -1,6 +1,22 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { APP, BASE, GROK_SECRET, GROK_URL, ROUTINE_TOKEN, ROUTINE_URL, TEAM, U1, U2, USER_TOKEN, cookieHeaderFrom, makeWorld, respond, setCookies } from './helpers.js';
+import {
+  APP,
+  BASE,
+  GROK_SECRET,
+  GROK_URL,
+  ROUTINE_TOKEN,
+  ROUTINE_URL,
+  TEAM,
+  U1,
+  U2,
+  USER_TOKEN,
+  cookieHeaderFrom,
+  makeWorld,
+  respond,
+  setCookies,
+  stripRouteMeta
+} from './helpers.js';
 
 function oauthData(userId = U1, over = {}) {
   return {
@@ -93,7 +109,12 @@ test('full connect flow: session cookie, CSRF, destination verified and stored; 
   const res = await post(w, '/destination', l.cookie, grokFields(l.csrf));
   assert.equal(res.status, 200);
   const entry = await w.routing.get(U1);
-  assert.deepEqual(entry, { dest_type: 'grok', url: GROK_URL, secret_or_bearer: GROK_SECRET, mode: 'full' });
+  assert.deepEqual(stripRouteMeta(entry), {
+    dest_type: 'grok',
+    url: GROK_URL,
+    secret_or_bearer: GROK_SECRET,
+    mode: 'ids_only'
+  });
   const ver = w.fetchImpl.calls.find((c) => c.url === GROK_URL);
   assert.equal(JSON.parse(new TextDecoder().decode(ver.init.body)).type, 'relay.verification');
   assert.match(ver.init.headers['webhook-signature'], /^v1,/);
@@ -106,7 +127,12 @@ test('claude_routine connect: fixed host, verification fires a run, entry in nud
   const l = await login(w);
   const res = await post(w, '/destination', l.cookie, grokFields(l.csrf, { dest_type: 'claude_routine', url: ROUTINE_URL, secret: ROUTINE_TOKEN }));
   assert.equal(res.status, 200);
-  assert.deepEqual(await w.routing.get(U1), { dest_type: 'claude_routine', url: ROUTINE_URL, secret_or_bearer: ROUTINE_TOKEN, mode: 'nudge' });
+  assert.deepEqual(stripRouteMeta(await w.routing.get(U1)), {
+    dest_type: 'claude_routine',
+    url: ROUTINE_URL,
+    secret_or_bearer: ROUTINE_TOKEN,
+    mode: 'nudge'
+  });
   assert.ok(w.fetchImpl.calls.some((c) => c.url === ROUTINE_URL));
 });
 

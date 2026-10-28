@@ -1,5 +1,6 @@
 import { FILTER_KEYWORD_MAX_LENGTH, FILTER_MAX_KEYWORDS, FILTER_MAX_USERS } from './constants.js';
 import { effectiveCaps, effectiveChannels, effectiveTrusted, normalizeIds, splitIds } from './caps.js';
+import { isSecretStale } from './secret-crypto.js';
 import { isUserId } from './routes.js';
 
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
@@ -50,6 +51,10 @@ export function filterMessageEvent(payload, { allowBots = false, allowChannels =
 
 const FORWARD_TYPES = { im: 'dm', mpim: 'group_dm', channel: 'channel', group: 'private_channel' };
 
+export function forwardsFullText(entry) {
+  return Boolean(entry && entry.mode === 'full');
+}
+
 export function buildForwardPayload(payload, nowMs, entry = {}, recipientId = '') {
   const ev = payload.event;
   const out = {
@@ -58,14 +63,26 @@ export function buildForwardPayload(payload, nowMs, entry = {}, recipientId = ''
     type: FORWARD_TYPES[ev.channel_type] || 'group_dm',
     channel_id: ev.channel,
     sender_id: ev.user,
-    text: typeof ev.text === 'string' ? ev.text : '',
     ts: ev.ts,
     thread_ts: typeof ev.thread_ts === 'string' ? ev.thread_ts : null,
     mode: effectiveCaps(entry.caps),
     sender_trusted: effectiveTrusted(entry.trusted_users).includes(ev.user)
   };
+  if (forwardsFullText(entry)) out.text = typeof ev.text === 'string' ? ev.text : '';
   if (isChannelEvent(ev)) out.mentioned = mentionsUser(ev.text, recipientId);
   return out;
+}
+
+export function hardLoopGuardBlocks(ev, entry) {
+  if (!effectiveCaps(entry.caps).send) return false;
+  if (ev.bot_id !== undefined) return true;
+  if (ev.app_id !== undefined) return true;
+  if (ev.bot_profile !== undefined) return true;
+  return false;
+}
+
+export function destinationSecretBlocked(entry, nowMs) {
+  return isSecretStale(entry, nowMs);
 }
 
 export function effectiveFilters(raw) {
