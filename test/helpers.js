@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { fireNudge } from '../src/destinations.js';
+import { EventDedupeCore } from '../src/event-dedupe-do.js';
 import { makeDeps, route } from '../src/index.js';
 import { routeCryptoFromEnv } from '../src/secret-crypto.js';
 import { kvRouting } from '../src/routes.js';
@@ -109,7 +110,30 @@ export function msgPayload({ sender = U1, channel = 'D0CHAN1', channelType = 'im
   };
 }
 
-export function makeWorld({ fetchHandler, nowMs = 1_800_000_000_000 } = {}) {
+export function fakeEventDedupeNamespace(nowFn) {
+  const storage = new FakeStorage();
+  const core = new EventDedupeCore({ storage, now: nowFn });
+  return {
+    idFromName: () => 'global',
+    get: () => ({
+      fetch: async (_url, init = {}) => {
+        let args = {};
+        try {
+          args = JSON.parse(init.body || '{}');
+        } catch {
+          args = {};
+        }
+        try {
+          return Response.json(core.claim(args));
+        } catch {
+          return new Response('{"error":"E_DEDUPE"}', { status: 400, headers: { 'content-type': 'application/json' } });
+        }
+      }
+    })
+  };
+}
+
+export function makeWorld({ fetchHandler, nowMs = 1_800_000_000_000, routeEncryption = true, bindEventDedupe = true } = {}) {
   const clock = { t: nowMs };
   const kv = new FakeKV();
   const pending = [];
@@ -129,6 +153,13 @@ export function makeWorld({ fetchHandler, nowMs = 1_800_000_000_000 } = {}) {
     ROUTE_SECRET_KEY_ID: ROUTE_ENC_KID,
     OPERATOR_HOSTS: ''
   };
+  if (!routeEncryption) {
+    delete env.ROUTE_SECRET_ENCRYPTION_KEY;
+    delete env.ROUTE_SECRET_KEY_ID;
+  }
+  if (bindEventDedupe) {
+    env.EVENT_DEDUPE_DO = fakeEventDedupeNamespace(() => clock.t);
+  }
   const routing = kvRouting(kv, routeCryptoFromEnv(env));
   const validateOpts = { ownHosts: parseOwnHosts('').concat(['relay.example.net']) };
 

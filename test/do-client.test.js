@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import worker from '../src/index.js';
 import { UserDO, makeDoClient } from '../src/user-do.js';
-import { FakeKV, ROUTINE_TOKEN, ROUTINE_URL, U1, U2 } from './helpers.js';
+import { FakeKV, ROUTE_ENC_KEY, ROUTE_ENC_KID, ROUTINE_TOKEN, ROUTINE_URL, U1, U2 } from './helpers.js';
 
 function fakeNamespace(env) {
   const objects = new Map();
@@ -46,7 +46,13 @@ async function withFetch(handler, fn) {
 async function setup() {
   const routes = new FakeKV();
   await routes.put(`route:${U1}`, JSON.stringify({ dest_type: 'claude_routine', url: ROUTINE_URL, secret_or_bearer: ROUTINE_TOKEN, mode: 'nudge' }));
-  const env = { ROUTES: routes, BASE_URL: 'https://relay.example.net', OPERATOR_HOSTS: '' };
+  const env = {
+    ROUTES: routes,
+    BASE_URL: 'https://relay.example.net',
+    OPERATOR_HOSTS: '',
+    ROUTE_SECRET_ENCRYPTION_KEY: ROUTE_ENC_KEY,
+    ROUTE_SECRET_KEY_ID: ROUTE_ENC_KID
+  };
   const { ns, alarms } = fakeNamespace(env);
   env.USER_DO = ns;
   return { env, client: makeDoClient(ns), alarms };

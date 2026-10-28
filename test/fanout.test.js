@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { listAuthorizedUserIds, resolveRecipients } from '../src/fanout.js';
 import { kvRouting } from '../src/routes.js';
-import { APP_TOKEN, FakeKV, GROK_SECRET, U1, U2, U3, U4, authListResponse, makeFetch, makeWorld, msgPayload, respond, timeoutError } from './helpers.js';
+import { routeCryptoFromEnv } from '../src/secret-crypto.js';
+import { APP_TOKEN, FakeKV, GROK_SECRET, ROUTE_ENC_KEY, ROUTE_ENC_KID, U1, U2, U3, U4, authListResponse, makeFetch, makeWorld, msgPayload, respond, timeoutError } from './helpers.js';
 
 const fresh = () => ({ routedSample: { at: -Infinity, ids: null }, nowMs: 1_800_000_000_000 });
 
 async function routingWith(...uids) {
-  const routing = kvRouting(new FakeKV());
+  const kv = new FakeKV();
+  const routing = kvRouting(kv, routeCryptoFromEnv({ ROUTE_SECRET_ENCRYPTION_KEY: ROUTE_ENC_KEY, ROUTE_SECRET_KEY_ID: ROUTE_ENC_KID }));
   for (const u of uids) await routing.put(u, { dest_type: 'grok', url: `https://hooks.x.ai/${u}`, secret_or_bearer: GROK_SECRET, mode: 'full' });
   return routing;
 }

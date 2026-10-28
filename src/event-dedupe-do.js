@@ -51,8 +51,15 @@ export class EventDedupeDO {
   }
 }
 
-export function makeEventDedupeClient(namespace) {
+export function makeEventDedupeClient(namespace, { allowInMemoryFallback = false } = {}) {
   if (!namespace) {
+    if (allowInMemoryFallback !== true) {
+      return {
+        async claim() {
+          throw new Error('E_DEDUPE_UNCONFIGURED');
+        }
+      };
+    }
     const mem = new Map();
     return {
       async claim(eventId, nowMs) {

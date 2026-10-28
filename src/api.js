@@ -455,7 +455,8 @@ async function handleRequests(deps, userId, pathname, method, body) {
     if (!hasChannelScopes(route.scopes)) return fail(409, 'scopes_missing', CHANNEL_SCOPE_ERROR);
   }
   let payload = req.payload;
-  if (req.type === 'destination' && deps.routeCrypto) {
+  if (req.type === 'destination') {
+    if (!deps.routeCrypto) return fail(503, 'unavailable', 'Destination proposals are temporarily unavailable.');
     const { secret, ...rest } = payload;
     payload = { ...rest, mode: 'ids_only', secret_enc: await encryptSecret(deps.routeCrypto, secret) };
   }

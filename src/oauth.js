@@ -20,6 +20,7 @@ import {
 } from './pages.js';
 import { decryptSecret, encryptSecret } from './secret-crypto.js';
 import { b64urlEncode, hmacSha256, parseCookies, randomBase64Url, timingSafeEqualStr, utf8 } from './util.js';
+import { RouteCryptoRequiredError } from './routes.js';
 import { wipeUser } from './wipe.js';
 
 const STATE_COOKIE_PREFIX = 'dmr_st_';
@@ -136,7 +137,8 @@ async function revokeToken(token, deps) {
 const sessionTtlS = (intent) => (intent === 'connect' ? SESSION_TTL_S : DISCONNECT_SESSION_TTL_S);
 
 async function sealSessionRecord(record, crypto) {
-  if (!crypto || typeof record.token !== 'string') return record;
+  if (typeof record.token !== 'string') return record;
+  if (!crypto) throw new RouteCryptoRequiredError();
   const { token, ...rest } = record;
   return { ...rest, token_enc: await encryptSecret(crypto, token) };
 }
@@ -224,7 +226,16 @@ export async function handleCallback(request, deps) {
     }
   }
   const record = intent === 'disconnect' ? { uid: userId, intent, token } : intent === 'connect' && scopes ? { uid: userId, intent, scopes } : { uid: userId, intent };
-  const { sid, cookie } = await mintSession(record, deps);
+  let sid;
+  let cookie;
+  try {
+    ({ sid, cookie } = await mintSession(record, deps));
+  } catch (e) {
+    if (e instanceof RouteCryptoRequiredError) {
+      return messagePage('Unavailable', 'This service cannot store secrets securely right now. Please try again later.', 503, [clear]);
+    }
+    throw e;
+  }
   const csrf = await csrfFor(deps, sid);
   const res = intent === 'connect' ? destinationFormPage({ csrf, manage: await manageFor(userId, deps) }) : disconnectConfirmPage({ csrf });
   res.headers.append('set-cookie', clear);
@@ -289,7 +300,14 @@ export async function handleDestination(request, deps) {
   const verified = await verifiers[destType]();
   if (verified.kind !== 'ok') return await retry(`Verification failed (${verified.kind}${verified.status ? ` ${verified.status}` : ''}). You can try again.`);
 
-  await deps.routing.put(userId, entry);
+  try {
+    await deps.routing.put(userId, entry);
+  } catch (e) {
+    if (e instanceof RouteCryptoRequiredError) {
+      return await retry('The relay cannot store secrets right now. Please try again later.');
+    }
+    throw e;
+  }
   await deps.userDo(userId).markConnected();
   await deps.kv.delete(`sess:${session.sid}`);
   const res = successPage();

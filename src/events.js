@@ -90,11 +90,10 @@ async function handleRevocation(event, deps) {
 
 export async function processEvent(payload, deps, { slackRetryNum = null } = {}) {
   const startMs = deps.now();
-  if (payload && typeof payload.event_id === 'string' && payload.event_id !== '') {
-    const claim = await deps.eventDedupe.claim(payload.event_id, startMs);
-    if (claim.duplicate) return;
-    if (slackRetryNum !== null && slackRetryNum !== '' && claim.duplicate) return;
-  }
+  if (!payload || typeof payload.event_id !== 'string' || payload.event_id === '') return;
+  const claim = await deps.eventDedupe.claim(payload.event_id, startMs);
+  if (claim.duplicate) return;
+  void slackRetryNum;
   const event = payload.event;
   if (event && (event.type === 'tokens_revoked' || event.type === 'app_uninstalled')) {
     await handleRevocation(event, deps);

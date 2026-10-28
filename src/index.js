@@ -17,7 +17,7 @@ import {
   startFlow
 } from './oauth.js';
 import { messagePage } from './pages.js';
-import { kvRouting } from './routes.js';
+import { kvRouting, ROUTE_SWEEP_REPORT_KEY, sweepPlaintextRouteEntries } from './routes.js';
 import { parseOwnHosts } from './ssrf.js';
 import { makeEventDedupeClient, EventDedupeDO } from './event-dedupe-do.js';
 import { routeCryptoFromEnv } from './secret-crypto.js';
@@ -50,7 +50,9 @@ export function makeDeps(env, overrides = {}) {
     },
     kv: env.ROUTES,
     routing: kvRouting(env.ROUTES, routeCryptoFromEnv(env)),
-    eventDedupe: makeEventDedupeClient(env.EVENT_DEDUPE_DO),
+    eventDedupe: makeEventDedupeClient(env.EVENT_DEDUPE_DO, {
+      allowInMemoryFallback: overrides.eventDedupeAllowMemory === true
+    }),
     userDo: makeDoClient(env.USER_DO),
     fetchImpl: (...args) => fetch(...args),
     now: () => Date.now(),
@@ -85,9 +87,23 @@ export async function route(request, deps, waitUntil) {
   return messagePage('Not found', 'Nothing here.', 404);
 }
 
+async function maybeSweepPlaintextRoutes(env, ctx) {
+  if (String(env.ROUTE_SWEEP_ON_BOOT || '') !== '1') return;
+  const crypto = routeCryptoFromEnv(env);
+  if (!crypto) return;
+  const force = String(env.ROUTE_SWEEP_FORCE || '') === '1';
+  if (!force && (await env.ROUTES.get(ROUTE_SWEEP_REPORT_KEY))) return;
+  ctx.waitUntil(
+    sweepPlaintextRouteEntries(env.ROUTES, crypto)
+      .then((report) => env.ROUTES.put(ROUTE_SWEEP_REPORT_KEY, JSON.stringify(report)))
+      .catch(() => {})
+  );
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
+      await maybeSweepPlaintextRoutes(env, ctx);
       return await route(request, makeDeps(env), (p) => ctx.waitUntil(p));
     } catch {
       console.error('E_UNHANDLED');
