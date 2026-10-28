@@ -1,6 +1,8 @@
 import { createHmac } from 'node:crypto';
 import { fireNudge } from '../src/destinations.js';
+import { EventDedupeCore } from '../src/event-dedupe-do.js';
 import { makeDeps, route } from '../src/index.js';
+import { routeCryptoFromEnv } from '../src/secret-crypto.js';
 import { kvRouting } from '../src/routes.js';
 import { parseOwnHosts } from '../src/ssrf.js';
 import { UserDOCore } from '../src/user-do.js';
@@ -18,6 +20,8 @@ export const ROUTINE_URL = 'https://api.anthropic.com/v1/claude_code/routines/tr
 export const ROUTINE_TOKEN = 'routine-bearer-token';
 export const CURSOR_URL = 'https://api2.cursor.sh/automations/webhook/123e4567-e89b-12d3-a456-426614174000';
 export const CURSOR_TOKEN = 'crsr_TestBearerToken0123456789_abc-DEF';
+export const ROUTE_ENC_KEY = Buffer.alloc(32, 7).toString('base64');
+export const ROUTE_ENC_KID = 'test-v1';
 export const U1 = 'U1AAAAAA';
 export const U2 = 'U2BBBBBB';
 export const U3 = 'U3CCCCCC';
@@ -106,13 +110,57 @@ export function msgPayload({ sender = U1, channel = 'D0CHAN1', channelType = 'im
   };
 }
 
-export function makeWorld({ fetchHandler, nowMs = 1_800_000_000_000 } = {}) {
+export function fakeEventDedupeNamespace(nowFn) {
+  const storage = new FakeStorage();
+  const core = new EventDedupeCore({ storage, now: nowFn });
+  return {
+    idFromName: () => 'global',
+    get: () => ({
+      fetch: async (_url, init = {}) => {
+        let args = {};
+        try {
+          args = JSON.parse(init.body || '{}');
+        } catch {
+          args = {};
+        }
+        try {
+          return Response.json(core.claim(args));
+        } catch {
+          return new Response('{"error":"E_DEDUPE"}', { status: 400, headers: { 'content-type': 'application/json' } });
+        }
+      }
+    })
+  };
+}
+
+export function makeWorld({ fetchHandler, nowMs = 1_800_000_000_000, routeEncryption = true, bindEventDedupe = true } = {}) {
   const clock = { t: nowMs };
   const kv = new FakeKV();
   const pending = [];
   const cores = new Map();
   const fetchImpl = makeFetch(fetchHandler || (() => respond(200, { ok: true })));
-  const routing = kvRouting(kv);
+  const env = {
+    SLACK_TEAM_ID: TEAM,
+    SLACK_APP_ID: APP,
+    BASE_URL: BASE,
+    PUBLIC_REPO_URL: 'https://github.example/dm-relay',
+    SLACK_SIGNING_SECRET: SIGNING_SECRET,
+    SLACK_CLIENT_ID: '111.222',
+    SLACK_CLIENT_SECRET: 'client-secret-for-tests',
+    SLACK_APP_TOKEN: APP_TOKEN,
+    STATE_HMAC_KEY: STATE_KEY,
+    ROUTE_SECRET_ENCRYPTION_KEY: ROUTE_ENC_KEY,
+    ROUTE_SECRET_KEY_ID: ROUTE_ENC_KID,
+    OPERATOR_HOSTS: ''
+  };
+  if (!routeEncryption) {
+    delete env.ROUTE_SECRET_ENCRYPTION_KEY;
+    delete env.ROUTE_SECRET_KEY_ID;
+  }
+  if (bindEventDedupe) {
+    env.EVENT_DEDUPE_DO = fakeEventDedupeNamespace(() => clock.t);
+  }
+  const routing = kvRouting(kv, routeCryptoFromEnv(env));
   const validateOpts = { ownHosts: parseOwnHosts('').concat(['relay.example.net']) };
 
   function entry(uid) {
@@ -140,18 +188,6 @@ export function makeWorld({ fetchHandler, nowMs = 1_800_000_000_000 } = {}) {
     return cores.get(uid);
   }
 
-  const env = {
-    SLACK_TEAM_ID: TEAM,
-    SLACK_APP_ID: APP,
-    BASE_URL: BASE,
-    PUBLIC_REPO_URL: 'https://github.example/dm-relay',
-    SLACK_SIGNING_SECRET: SIGNING_SECRET,
-    SLACK_CLIENT_ID: '111.222',
-    SLACK_CLIENT_SECRET: 'client-secret-for-tests',
-    SLACK_APP_TOKEN: APP_TOKEN,
-    STATE_HMAC_KEY: STATE_KEY,
-    OPERATOR_HOSTS: ''
-  };
   const deps = makeDeps(env, {
     kv,
     routing,
@@ -195,10 +231,22 @@ export function makeWorld({ fetchHandler, nowMs = 1_800_000_000_000 } = {}) {
     async addRoute(uid, e) {
       await routing.put(uid, e);
     },
-    addGrok: (uid, url = `https://hooks.x.ai/w/${uid}`) =>
-      routing.put(uid, { dest_type: 'grok', url, secret_or_bearer: GROK_SECRET, mode: 'full' }),
-    addCursor: (uid, url = CURSOR_URL, token = CURSOR_TOKEN) =>
-      routing.put(uid, { dest_type: 'cursor', url, secret_or_bearer: token, mode: 'full' }),
+    addGrok: (uid, url = `https://hooks.x.ai/w/${uid}`, { full = false } = {}) =>
+      routing.put(uid, {
+        dest_type: 'grok',
+        url,
+        secret_or_bearer: GROK_SECRET,
+        secret_verified_at: clock.t,
+        mode: full ? 'full' : 'ids_only'
+      }),
+    addCursor: (uid, url = CURSOR_URL, token = CURSOR_TOKEN, { full = false } = {}) =>
+      routing.put(uid, {
+        dest_type: 'cursor',
+        url,
+        secret_or_bearer: token,
+        secret_verified_at: clock.t,
+        mode: full ? 'full' : 'ids_only'
+      }),
     addClaude: (uid, url = ROUTINE_URL) =>
       routing.put(uid, { dest_type: 'claude_routine', url, secret_or_bearer: ROUTINE_TOKEN, mode: 'nudge' })
   };
@@ -215,6 +263,12 @@ export function isAuthList(url) {
 
 export function setCookies(res) {
   return res.headers.getSetCookie();
+}
+
+export function stripRouteMeta(entry) {
+  if (!entry) return entry;
+  const { secret_enc, secret_verified_at, ...rest } = entry;
+  return rest;
 }
 
 export function cookieHeaderFrom(res) {

@@ -53,7 +53,7 @@ test('/connect disclosures are all present', async () => {
     /controlled by your own automation permissions/,
     /hostile message/,
     /Do not put secrets in the voice text/,
-    /receives the text and forwards none of it/,
+    /Claude routines use nudge mode/,
     /not a technical guarantee/,
     /about 60 seconds/,
     /one real routine run/,

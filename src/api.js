@@ -1,5 +1,6 @@
 import { API_BODY_MAX, API_KEY_MAX, CHANNEL_ALLOWLIST_MAX, API_RATE, CHANGE_LOG_MAX, REQUEST_MAX_PENDING, REQUEST_TRUSTED_MAX, REQUEST_TTL_MS, FILTER_KEYWORD_MAX_LENGTH, FILTER_MAX_KEYWORDS, FILTER_MAX_USERS, LIMITS, TRUSTED_MAX, VOICE_MAX } from './constants.js';
 import { hashKey, KEY_PATTERN } from './apikeys.js';
+import { encryptSecret } from './secret-crypto.js';
 import { CHANNEL_SCOPE_ERROR, cleanVoice, effectiveCaps, effectiveChannels, effectiveTrusted, effectiveVoice, hasChannelScopes, normalizeChannelIds, normalizeIds } from './caps.js';
 import { effectiveFilters, validateFilters } from './filter.js';
 import { PROMPT_TYPES, buildPrompt } from './prompts.js';
@@ -97,7 +98,7 @@ const SPEC_FORWARDED = {
     type: 'dm | group_dm | channel (public) | private_channel',
     channel_id: 'Slack conversation ID',
     sender_id: 'Slack user ID of the author',
-    text: 'untrusted message text; empty string if absent',
+    text: 'included only when the user opted in to full-text forwarding in the browser; otherwise omitted',
     ts: 'Slack message timestamp',
     thread_ts: 'thread parent timestamp or null',
     mode: '{process, draft, send} mirroring settings.caps; a hint, not enforcement',
@@ -280,6 +281,12 @@ function parsePatch(body, route) {
     if (!isObject(body.filters)) return bad('filters must be an object.');
     const u = unknownIn(body.filters, ['skip_bots', 'skip_users', 'keywords'], 'filters.');
     if (u) return u;
+    if (body.filters.skip_bots === false) {
+      return {
+        status: 403,
+        message: 'The skip-bots filter can only be turned off in the browser at /connect.'
+      };
+    }
     const merged = { ...effectiveFilters(route.filters), ...body.filters };
     if (typeof merged.skip_bots !== 'boolean') return bad('filters.skip_bots must be true or false.');
     if (!Array.isArray(merged.skip_users) || !Array.isArray(merged.keywords)) return bad('filters.skip_users and filters.keywords must be arrays.');
@@ -447,7 +454,13 @@ async function handleRequests(deps, userId, pathname, method, body) {
     if (effectiveChannels(route.channels).enabled) return fail(409, 'already_enabled', 'Channels are already on.');
     if (!hasChannelScopes(route.scopes)) return fail(409, 'scopes_missing', CHANNEL_SCOPE_ERROR);
   }
-  const made = await doc.reqCreate({ id: newRequestId(), type: req.type, summary: req.summary, detail: req.detail, payload: req.payload });
+  let payload = req.payload;
+  if (req.type === 'destination') {
+    if (!deps.routeCrypto) return fail(503, 'unavailable', 'Destination proposals are temporarily unavailable.');
+    const { secret, ...rest } = payload;
+    payload = { ...rest, mode: 'ids_only', secret_enc: await encryptSecret(deps.routeCrypto, secret) };
+  }
+  const made = await doc.reqCreate({ id: newRequestId(), type: req.type, summary: req.summary, detail: req.detail, payload });
   if (!made.ok) return fail(409, 'too_many_pending', `At most ${REQUEST_MAX_PENDING} requests can be pending. Cancel one or wait for the user.`);
   return json({ id: made.id, type: made.type, status: 'pending', expires: iso(made.expires) }, made.duplicate ? 200 : 201);
 }

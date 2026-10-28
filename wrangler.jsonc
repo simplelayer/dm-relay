@@ -7,10 +7,14 @@
     { "binding": "ROUTES", "id": "a38f420c962c4e7e8acf0dac5694b224" }
   ],
   "durable_objects": {
-    "bindings": [{ "name": "USER_DO", "class_name": "UserDO" }]
+    "bindings": [
+      { "name": "USER_DO", "class_name": "UserDO" },
+      { "name": "EVENT_DEDUPE_DO", "class_name": "EventDedupeDO" }
+    ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["UserDO"] }
+    { "tag": "v1", "new_sqlite_classes": ["UserDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["EventDedupeDO"] }
   ],
   "vars": {
     "SLACK_TEAM_ID": "TGVBK27C3",

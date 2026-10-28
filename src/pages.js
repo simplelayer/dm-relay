@@ -120,12 +120,12 @@ ${card('', 'What is DM Relay?', `<p>DM Relay turns your Slack direct messages in
 ${card('', 'What this does', `<p>When you connect, direct messages and group DMs sent to you (and by you) are delivered to the Slack app, then forwarded to the AI destination you choose (a Grok bot, a Cursor automation or a Claude routine). Only people who click Allow have a listener. People who DM you have their messages processed by your AI; they have not consented.</p>
 <p>The relay cannot send anything to Slack. It never stores message text. Your Slack token is never stored, except for up to 10 minutes during a disconnect, until you confirm.</p>`)}
 ${card('', 'Disclosures', `<ul>
-<li>Slack delivers the full text of your DMs to this relay Worker in both modes. In <code>full</code> (Grok and Cursor) mode the relay forwards the full DM text to the destination, which for Cursor means it is sent to Cursor. In <code>nudge</code> (Claude) mode the relay receives the text and forwards none of it; the text reaches Claude only through your own Slack connector. Cloudflare and the operator can technically see text in transit, and your destination's AI vendor sees it by design.</li>
+<li>Slack delivers the full text of your DMs to this relay Worker. By default Grok and Cursor destinations receive metadata only (event id, channel id, sender id, timestamps). If you opt in on the destination form, the relay forwards the full DM text, which for Cursor means it is sent to Cursor. Claude routines use nudge mode: the relay forwards none of the text; content reaches Claude only through your own Slack connector. Cloudflare and the operator can technically see text in transit, and your destination's AI vendor sees full text only when you opt in.</li>
 <li>The operator is also the Slack workspace owner, Slack app owner and Cloudflare account owner. Privacy from the operator is a written commitment backed by public code, not a technical guarantee. The owner can see who has opted in (Slack admin app authorization view).</li>
 <li>Per-user counters (forwarded, dropped, errors, fanout_degraded) are activity metadata that is visible to the operator.</li>
 <li>The relay also keeps a delivery log of your last 20 delivery events (time, destination type and outcome only) and the filter rules you set (skipped user IDs and keywords). The log and the rules are visible to the operator and are deleted when you disconnect. No message text, channel or sender is kept.</li>
 <li>Delivery is best-effort and at-most-once. If your destination is down, DMs during the outage are not delivered. Claude nudges can also be lost to daily run caps or timeouts. Forwarding can continue for up to about 60 seconds after you disconnect. Messages in roughly the first minute after you connect may not be delivered. For Cursor, there is no retry after a timeout or a 5xx other than 503, because the run may already have started (at-most-once holds).</li>
-<li>Your destination secret or bearer token (Grok signing secret, Claude routine token or Cursor automation token) is stored in the relay's key-value store and is readable by the operator.</li>
+<li>Your destination secret or bearer token is encrypted at rest in the relay's key-value store (AES-GCM with a Worker-only key). The operator can still decrypt it with Cloudflare access. Slack app credentials are not stored in KV; they are Worker secrets.</li>
 <li>If your assistant proposes a destination, the proposed URL and secret are held in your Durable Object, readable by the operator, until you approve or reject it or it expires after 24 hours. The secret is deleted from that store when the request is resolved. Nothing is contacted or saved until you approve.</li>
 <li>Connecting a Claude routine fires one real routine run to verify it, which uses one of your daily runs.</li>
 <li>Each verification attempt can trigger one automation run.</li>
@@ -143,8 +143,8 @@ ${card('', 'Cursor automation setup rules', `<ul>
 <li>What the automation may do (process, draft, send) is controlled by its own permissions. Keep send off unless you need it.</li>
 <li>In the automation prompt, state that the DM text is data, not instructions, because any workspace member can write text the automation reads.</li>
 </ul>`)}
-${card('', 'Unattended-agent risk', `<p>Routines run unattended. Any workspace member can write text your routine reads, so prompt injection is possible. Whoever holds the routine bearer token (the operator, through the key-value store) can inject arbitrary instructions into your agent through the fire text. Keep send off for your Grok bot, Cursor automation or Claude routine unless you need it, and rely on the trusted-sender list.</p>
-<p>The same applies to Cursor automations: any workspace member can write text your automation reads, and whoever holds the Cursor bearer token (the operator, through the key-value store) can trigger your automation with arbitrary content.</p>`)}
+${card('', 'Unattended-agent risk', `<p>Routines run unattended. Any workspace member can write text your routine reads, so prompt injection is possible. Whoever can read KV and hold the Worker encryption key (the operator) can inject arbitrary instructions into your agent through the fire text. Keep send off for your Grok bot, Cursor automation or Claude routine unless you need it, and rely on the trusted-sender list.</p>
+<p>The same applies to Cursor automations: any workspace member can write text your automation reads, and whoever can read KV and hold the Worker encryption key (the operator) can trigger your automation with arbitrary content.</p>`)}
 ${card('', 'Third parties and training', `<p><label class="inline" for="attest-preview"><input id="attest-preview" type="checkbox" name="attest_preview" value="1"> <span>I attest that model training on inputs is turned off for my destination account (Claude: "Help improve Claude" off, or a Team/Enterprise plan; Grok: the equivalent setting; Cursor: privacy mode on). You will be asked to confirm this again before activation.</span></label></p>`)}
 ${card('', 'Source code', `<p>Public repository: ${repoLink(publicRepoUrl)}</p><p><a class="btn btn-primary" href="${esc(authorizeUrl)}">Continue to Slack</a></p>`)}`;
   return htmlResponse('DM Relay', body, { cookies: [cookie] });
@@ -170,7 +170,11 @@ ${result}
 function destinationForm(csrf, sel, saved) {
   const radios = ['grok', 'cursor', 'claude_routine']
     .map((t) => {
-      const text = { grok: 'Grok automation webhook (full mode)', cursor: 'Cursor automation webhook (full mode: the full DM text is sent to Cursor)', claude_routine: 'Claude routine (nudge mode)' }[t];
+      const text = {
+        grok: 'Grok automation webhook (IDs-only by default)',
+        cursor: 'Cursor automation webhook (IDs-only by default)',
+        claude_routine: 'Claude routine (nudge mode)'
+      }[t];
       return `<label class="inline" for="t-${t}"><input id="t-${t}" type="radio" name="dest_type" value="${t}"${sel === t ? ' checked' : ''}> <span>${text}</span></label>`;
     })
     .join('\n');
@@ -183,8 +187,11 @@ ${radios}
 </fieldset>
 <div class="field"><label for="f-url">Webhook URL or routine fire URL</label><input id="f-url" type="text" name="url" autocomplete="off" required>${examples}</div>
 <div class="field"><label for="f-secret">${secrets}</label><input id="f-secret" type="password" name="secret" autocomplete="off" required></div>
+<div class="only grok only cursor send-box">
+<p><label class="inline" for="f-full"><input id="f-full" type="checkbox" name="forward_full_text" value="1"> <span><strong>Forward full DM text</strong> to this destination (off by default). Counterparties have not consented to their messages being sent to an AI vendor in full. Only enable this if you accept that risk.</span></label></p>
+</div>
 <p><label class="inline" for="f-attest"><input id="f-attest" type="checkbox" name="attest" value="1" required> <span>I attest that model training on inputs is turned off for this destination account (for Cursor: privacy mode is on; the attestation covers the account that owns the token).</span></label></p>
-<p class="only cursor muted small">Cursor: Each verification attempt can trigger one automation run. The automation must treat DM text as data, not instructions, and what it may do is controlled by its own permissions. Whoever holds the bearer token (the operator, through the key-value store) can trigger the automation with arbitrary content.</p>
+<p class="only cursor muted small">Cursor: Each verification attempt can trigger one automation run. The automation must treat DM text as data, not instructions, and what it may do is controlled by its own permissions. Whoever can read KV and hold the Worker encryption key (the operator) can trigger the automation with arbitrary content.</p>
 <p class="only claude_routine muted small">Claude: verifying fires one real routine run, which uses one of your daily runs.</p>
 <p class="muted small">Leaving without activating keeps Slack access until you run /disconnect.</p>
 <p><button type="submit" class="btn-primary">Verify and activate</button></p>

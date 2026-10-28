@@ -7,6 +7,8 @@ import {
   COUNTER_NAMES,
   DELIVERY_LOG_MAX,
   FILTER_COUNTER_NAMES,
+  FORWARD_CAP_LIMIT,
+  FORWARD_CAP_WINDOW_MS,
   HOUR_MS,
   LIMITS,
   REQUEST_MAX_KEPT,
@@ -21,6 +23,7 @@ import {
 } from './constants.js';
 import { outcomeLabel, sanitizeDelivery } from './delivery-log.js';
 import { fireNudge, isDefiniteFailure } from './destinations.js';
+import { routeCryptoFromEnv } from './secret-crypto.js';
 import { kvRouting } from './routes.js';
 import { parseOwnHosts } from './ssrf.js';
 
@@ -45,6 +48,7 @@ const METHODS = new Set([
   'reqList',
   'reqGet',
   'reqResolve',
+  'consumeForwardSlot',
   'status',
   'wipe'
 ]);
@@ -120,6 +124,20 @@ export class UserDOCore {
     this.#inc(name);
     this.#bump(1);
     return { ok: true };
+  }
+
+  consumeForwardSlot({ channelId }) {
+    if (typeof channelId !== 'string' || channelId === '') throw new Error('E_DO_FWD');
+    const now = this.now();
+    const key = `fwd:${channelId}`;
+    let [start, count] = this.s.get(key) || [null, 0];
+    if (start == null || now - start >= FORWARD_CAP_WINDOW_MS) {
+      start = now;
+      count = 0;
+    }
+    if (count >= FORWARD_CAP_LIMIT) return { allowed: false };
+    this.s.put(key, [start, count + 1]);
+    return { allowed: true };
   }
 
   consumeLimit({ name }) {
@@ -209,8 +227,18 @@ export class UserDOCore {
     if (payload === null || typeof payload !== 'object' || detail === null || typeof detail !== 'object') throw new Error('E_DO_REQ');
     const all = this.#reqs();
     const pending = all.filter((r) => r.status === 'pending');
-    const same = JSON.stringify(payload);
-    const dup = pending.find((r) => r.type === type && JSON.stringify(r.payload) === same);
+    const dup = pending.find((r) => {
+      if (r.type !== type) return false;
+      if (type === 'destination') {
+        return (
+          r.payload &&
+          payload &&
+          r.payload.dest_type === payload.dest_type &&
+          r.payload.url === payload.url
+        );
+      }
+      return JSON.stringify(r.payload) === JSON.stringify(payload);
+    });
     if (dup) return { ok: true, duplicate: true, id: dup.id, type: dup.type, status: 'pending', expires: dup.expires };
     if (pending.length >= REQUEST_MAX_PENDING) return { ok: false, error: 'max_pending' };
     const now = this.now();
@@ -403,7 +431,7 @@ function syncStorage(storage) {
 }
 
 function makeFire(env) {
-  const routing = kvRouting(env.ROUTES);
+  const routing = kvRouting(env.ROUTES, routeCryptoFromEnv(env));
   const validateOpts = { ownHosts: parseOwnHosts(env.OPERATOR_HOSTS).concat(ownHost(env.BASE_URL)) };
   return async ({ userId, channelId, ts }) => {
     const entry = await routing.get(userId);

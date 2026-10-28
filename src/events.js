@@ -1,7 +1,16 @@
 import { WAIT_UNTIL_BUDGET_MS } from './constants.js';
 import { forwardCursor, forwardGrok } from './destinations.js';
 import { destLabel, outcomeLabel } from './delivery-log.js';
-import { applyChannelPolicy, applyUserFilters, buildForwardPayload, checkEnvelope, filterMessageEvent, isChannelEvent } from './filter.js';
+import {
+  applyChannelPolicy,
+  applyUserFilters,
+  buildForwardPayload,
+  checkEnvelope,
+  destinationSecretBlocked,
+  filterMessageEvent,
+  hardLoopGuardBlocks,
+  isChannelEvent
+} from './filter.js';
 import { resolveRecipients } from './fanout.js';
 import { isUserId } from './routes.js';
 import { wipeUser } from './wipe.js';
@@ -18,6 +27,19 @@ async function deliver(recipient, payload, deps, deadlineMs) {
     if (isChannelEvent(payload.event) && !applyChannelPolicy(payload.event, userId, entry.channels).forward) return;
     if ((await userDo.check()).disconnected) {
       await userDo.increment({ name: 'dropped' });
+      return;
+    }
+    if (destinationSecretBlocked(entry, deps.now())) {
+      await userDo.recordFiltered({ reason: 'secret_stale' });
+      return;
+    }
+    if (hardLoopGuardBlocks(payload.event, entry)) {
+      await userDo.recordFiltered({ reason: 'loop' });
+      return;
+    }
+    const cap = await userDo.consumeForwardSlot({ channelId: payload.event.channel });
+    if (!cap.allowed) {
+      await userDo.recordFiltered({ reason: 'rate' });
       return;
     }
     const verdict = applyUserFilters(payload.event, entry.filters);
@@ -66,8 +88,12 @@ async function handleRevocation(event, deps) {
   }
 }
 
-export async function processEvent(payload, deps) {
+export async function processEvent(payload, deps, { slackRetryNum = null } = {}) {
   const startMs = deps.now();
+  if (!payload || typeof payload.event_id !== 'string' || payload.event_id === '') return;
+  const claim = await deps.eventDedupe.claim(payload.event_id, startMs);
+  if (claim.duplicate) return;
+  void slackRetryNum;
   const event = payload.event;
   if (event && (event.type === 'tokens_revoked' || event.type === 'app_uninstalled')) {
     await handleRevocation(event, deps);
@@ -128,8 +154,9 @@ export async function handleSlackEvents(request, deps, waitUntil) {
     return textResponse('ok', 200);
   }
   if (payload.type === 'event_callback') {
+    const slackRetryNum = request.headers.get('x-slack-retry-num');
     waitUntil(
-      processEvent(payload, deps).catch(() => {
+      processEvent(payload, deps, { slackRetryNum }).catch(() => {
         console.error('E_PROCESS');
       })
     );

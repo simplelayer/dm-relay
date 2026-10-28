@@ -69,7 +69,17 @@ export const LIMITS = {
 export const FILTER_MAX_KEYWORDS = 20;
 export const FILTER_KEYWORD_MAX_LENGTH = 50;
 export const FILTER_MAX_USERS = 50;
-export const FILTER_COUNTER_NAMES = ['filtered_bot', 'filtered_sender', 'filtered_keyword'];
+export const FILTER_COUNTER_NAMES = [
+  'filtered_bot',
+  'filtered_sender',
+  'filtered_keyword',
+  'filtered_loop',
+  'filtered_rate',
+  'filtered_secret_stale'
+];
+
+export const FORWARD_CAP_LIMIT = 5;
+export const FORWARD_CAP_WINDOW_MS = 300000;
 
 export const CAPS_DEFAULT = { process: true, draft: true, send: false };
 export const SEND_WORD = 'SEND';

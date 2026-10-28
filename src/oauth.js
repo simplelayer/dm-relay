@@ -18,7 +18,9 @@ import {
   statusPage,
   successPage
 } from './pages.js';
+import { decryptSecret, encryptSecret } from './secret-crypto.js';
 import { b64urlEncode, hmacSha256, parseCookies, randomBase64Url, timingSafeEqualStr, utf8 } from './util.js';
+import { RouteCryptoRequiredError } from './routes.js';
 import { wipeUser } from './wipe.js';
 
 const STATE_COOKIE_PREFIX = 'dmr_st_';
@@ -134,10 +136,30 @@ async function revokeToken(token, deps) {
 // A disconnect session holds a Slack token, so it stays short. Connect sessions hold none.
 const sessionTtlS = (intent) => (intent === 'connect' ? SESSION_TTL_S : DISCONNECT_SESSION_TTL_S);
 
+async function sealSessionRecord(record, crypto) {
+  if (typeof record.token !== 'string') return record;
+  if (!crypto) throw new RouteCryptoRequiredError();
+  const { token, ...rest } = record;
+  return { ...rest, token_enc: await encryptSecret(crypto, token) };
+}
+
+async function openSessionRecord(rec, crypto) {
+  if (typeof rec.token === 'string') return rec;
+  if (rec.token_enc && crypto) {
+    try {
+      return { ...rec, token: await decryptSecret(crypto, rec.token_enc) };
+    } catch {
+      return rec;
+    }
+  }
+  return rec;
+}
+
 async function mintSession(record, deps) {
   const sid = randomBase64Url(32);
   const ttl = sessionTtlS(record.intent);
-  await deps.kv.put(`sess:${sid}`, JSON.stringify({ ...record, created: deps.now() }), { expirationTtl: ttl });
+  const sealed = await sealSessionRecord({ ...record, created: deps.now() }, deps.routeCrypto);
+  await deps.kv.put(`sess:${sid}`, JSON.stringify(sealed), { expirationTtl: ttl });
   return { sid, cookie: `${SESSION_COOKIE}=${sid}; ${ATTRS}; Path=/; Max-Age=${ttl}` };
 }
 
@@ -147,7 +169,7 @@ async function getSession(request, deps) {
   const raw = await deps.kv.get(`sess:${sid}`);
   if (!raw) return null;
   try {
-    const rec = JSON.parse(raw);
+    const rec = await openSessionRecord(JSON.parse(raw), deps.routeCrypto);
     if (deps.now() - rec.created > sessionTtlS(rec.intent) * 1000) return null;
     return { sid, rec };
   } catch {
@@ -204,7 +226,16 @@ export async function handleCallback(request, deps) {
     }
   }
   const record = intent === 'disconnect' ? { uid: userId, intent, token } : intent === 'connect' && scopes ? { uid: userId, intent, scopes } : { uid: userId, intent };
-  const { sid, cookie } = await mintSession(record, deps);
+  let sid;
+  let cookie;
+  try {
+    ({ sid, cookie } = await mintSession(record, deps));
+  } catch (e) {
+    if (e instanceof RouteCryptoRequiredError) {
+      return messagePage('Unavailable', 'This service cannot store secrets securely right now. Please try again later.', 503, [clear]);
+    }
+    throw e;
+  }
   const csrf = await csrfFor(deps, sid);
   const res = intent === 'connect' ? destinationFormPage({ csrf, manage: await manageFor(userId, deps) }) : disconnectConfirmPage({ csrf });
   res.headers.append('set-cookie', clear);
@@ -255,7 +286,9 @@ export async function handleDestination(request, deps) {
     dest_type: destType,
     url: checked.url,
     secret_or_bearer: checked.secret,
-    mode: destType === 'claude_routine' ? 'nudge' : 'full'
+    secret_verified_at: deps.now(),
+    mode:
+      destType === 'claude_routine' ? 'nudge' : form.get('forward_full_text') === '1' ? 'full' : 'ids_only'
   };
   for (const k of ['filters', 'caps', 'trusted_users', 'voice', 'channels', 'scopes']) if (previous && previous[k] !== undefined) entry[k] = previous[k];
   if (!entry.scopes && Array.isArray(session.rec.scopes)) entry.scopes = session.rec.scopes;
@@ -267,7 +300,14 @@ export async function handleDestination(request, deps) {
   const verified = await verifiers[destType]();
   if (verified.kind !== 'ok') return await retry(`Verification failed (${verified.kind}${verified.status ? ` ${verified.status}` : ''}). You can try again.`);
 
-  await deps.routing.put(userId, entry);
+  try {
+    await deps.routing.put(userId, entry);
+  } catch (e) {
+    if (e instanceof RouteCryptoRequiredError) {
+      return await retry('The relay cannot store secrets right now. Please try again later.');
+    }
+    throw e;
+  }
   await deps.userDo(userId).markConnected();
   await deps.kv.delete(`sess:${session.sid}`);
   const res = successPage();
@@ -452,10 +492,20 @@ async function applyRequest(deps, userId, rec, form) {
   const p = rec.payload;
   if (rec.type === 'destination') {
     if (form.get('attest') !== '1') return 'The training attestation is required.';
-    const checked = checkDestinationInput({ destType: p.dest_type, url: p.url, secret: p.secret }, deps.validateOpts);
+    let secret = p.secret;
+    if (typeof secret !== 'string' && p.secret_enc && deps.routeCrypto) {
+      secret = await decryptSecret(deps.routeCrypto, p.secret_enc);
+    }
+    const checked = checkDestinationInput({ destType: p.dest_type, url: p.url, secret }, deps.validateOpts);
     if (checked.error) return checked.error;
     if (!(await doc.consumeRegistration()).allowed) return 'Too many registration attempts. Please try again later.';
-    const entry = { dest_type: p.dest_type, url: checked.url, secret_or_bearer: checked.secret, mode: p.dest_type === 'claude_routine' ? 'nudge' : 'full' };
+    const entry = {
+      dest_type: p.dest_type,
+      url: checked.url,
+      secret_or_bearer: secret,
+      secret_verified_at: deps.now(),
+      mode: p.dest_type === 'claude_routine' ? 'nudge' : p.mode === 'full' ? 'full' : 'ids_only'
+    };
     for (const k of ['filters', 'caps', 'trusted_users', 'voice', 'channels', 'scopes']) if (route && route[k] !== undefined) entry[k] = route[k];
     const verified = await VERIFIERS[p.dest_type](entry, deps);
     if (verified.kind !== 'ok') return `Verification failed (${verified.kind}${verified.status ? ` ${verified.status}` : ''}). The request is still pending; you can try again.`;
